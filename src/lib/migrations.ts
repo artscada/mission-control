@@ -1428,6 +1428,62 @@ const migrations: Migration[] = [
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN signature TEXT DEFAULT NULL`)
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN public_key TEXT DEFAULT NULL`)
     }
+  },
+  {
+    id: '051_operit_devices_runs',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operit_devices (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          base_url TEXT NOT NULL,
+          bearer_token TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          agent_name TEXT,
+          default_mode TEXT NOT NULL DEFAULT 'sse',
+          default_show_floating INTEGER NOT NULL DEFAULT 0,
+          default_return_tool_status INTEGER NOT NULL DEFAULT 1,
+          default_initial_mode TEXT,
+          version_name TEXT,
+          last_health_status TEXT,
+          last_health_at INTEGER,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          workspace_id INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(workspace_id, name)
+        )
+      `)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_devices_workspace ON operit_devices(workspace_id)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_devices_enabled ON operit_devices(enabled)`)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operit_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL,
+          device_id INTEGER,
+          device_name TEXT NOT NULL,
+          agent_name TEXT,
+          request_id TEXT,
+          chat_id TEXT,
+          mode TEXT NOT NULL DEFAULT 'sse',
+          status TEXT NOT NULL DEFAULT 'started',
+          prompt_text TEXT,
+          response_text TEXT,
+          raw_stream TEXT,
+          error_message TEXT,
+          started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          finished_at INTEGER,
+          workspace_id INTEGER NOT NULL DEFAULT 1,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          FOREIGN KEY (device_id) REFERENCES operit_devices(id) ON DELETE SET NULL
+        )
+      `)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_runs_task_id ON operit_runs(task_id)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_runs_device_id ON operit_runs(device_id)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_runs_workspace ON operit_runs(workspace_id)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_runs_started_at ON operit_runs(started_at)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_runs_status ON operit_runs(status)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_operit_runs_request_id ON operit_runs(request_id)`)
+    }
   }
 ]
 

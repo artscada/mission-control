@@ -137,6 +137,12 @@ docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 - Connect Claude Code/Codex via CLI integration
 - Keep your current workflows while adding centralized observability and controls
 
+5) Orchestrate Android phone agents over LAN with Operit HTTP
+- Enable the Operit HTTP service on each device
+- Sync devices into Mission Control as `operit-*` agents
+- Dispatch direct commands, scheduled tasks, and operator messages from one dashboard
+- Use lightweight live previews on the grid and open full live views only for the active phone
+
 ---
 
 ## Getting Started with Agents
@@ -175,6 +181,7 @@ For the full walkthrough, see the **[Quickstart Guide](docs/quickstart.md)**.
 | [Quickstart](docs/quickstart.md) | Register an agent, create a task, complete it — 5 minutes |
 | [Agent Setup](docs/agent-setup.md) | SOUL personalities, config, heartbeats, agent sources |
 | [Orchestration](docs/orchestration.md) | Multi-agent workflows, auto-dispatch, quality review gates |
+| [Operit HTTP Fleet Guide](docs/operit-http-fleet.md) | Run Android phones with Operit as LAN-addressable Mission Control agents |
 | [CLI Reference](docs/cli-agent-control.md) | Full CLI command list for headless/scripted usage |
 | [CLI Integration](docs/cli-integration.md) | Connect Claude Code, Codex, or any CLI tool directly |
 | [Deployment](docs/deployment.md) | Production deployment, reverse proxy, VPS setup |

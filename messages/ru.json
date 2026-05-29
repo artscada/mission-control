@@ -463,6 +463,7 @@
     "markAllRead": "Отметить всё прочитанным",
     "recipientLabel": "Получатель",
     "recipientPlaceholder": "Имя агента (например, my-agent)",
+    "allRecipients": "Все получатели",
     "noNotifications": "Нет уведомлений",
     "markRead": "Отметить прочитанным"
   },
@@ -755,6 +756,7 @@
     "spawn": "Создать",
     "noActiveSpawnRequests": "Нет активных запросов на создание",
     "dismissError": "Закрыть ошибку",
+    "filteredEmptyState": "Для проекта {project} задачи не найдены. Показываю пустую доску из-за активного фильтра.",
     "taskBoardAriaLabel": "Доска задач",
     "columnAriaLabel": "Колонка {title}, {count} задач",
     "colBacklog": "Бэклог",

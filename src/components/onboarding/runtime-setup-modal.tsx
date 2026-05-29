@@ -1100,7 +1100,7 @@ function CodexSetup({ onClose, onComplete }: { onClose: () => void; onComplete: 
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-lg font-semibold">Set Up Codex CLI</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">Authenticate the OpenAI CLI agent</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Authenticate Codex or point it at a configured provider such as OmniRoute</p>
         </div>
         <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
           <svg className="w-5 h-5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M4 4l8 8M12 4l-8 8" /></svg>
@@ -1153,7 +1153,8 @@ function CodexSetup({ onClose, onComplete }: { onClose: () => void; onComplete: 
               <code className="block font-mono text-sm text-foreground select-all">codex auth</code>
             </div>
             <p className="text-xs text-muted-foreground">
-              This authenticates with your OpenAI account, or you can set <code className="text-[11px] bg-black/20 px-1 rounded">OPENAI_API_KEY</code> in your environment.
+              This authenticates with your OpenAI account, or you can configure a custom provider in <code className="text-[11px] bg-black/20 px-1 rounded">~/.codex/config.toml</code>.
+              Mission Control also accepts Codex setups that use an env-backed provider key such as <code className="text-[11px] bg-black/20 px-1 rounded">OMNIROUTE_API_KEY</code>.
             </p>
           </div>
 

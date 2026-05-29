@@ -49,6 +49,7 @@ interface RuntimeStatusInfo {
 
 interface SystemCapabilities {
   claudeSessions: number
+  codexSessions: number
   agentCount: number
   gatewayConnected: boolean
   hasSkills: boolean
@@ -78,6 +79,7 @@ export function OnboardingWizard() {
   const [runtimesLoading, setRuntimesLoading] = useState(true)
   const [capabilities, setCapabilities] = useState<SystemCapabilities>({
     claudeSessions: 0,
+    codexSessions: 0,
     agentCount: 0,
     gatewayConnected: false,
     hasSkills: false,
@@ -122,6 +124,7 @@ export function OnboardingWizard() {
       const runtimesData = runtimesResult.status === 'fulfilled' ? runtimesResult.value : null
       setCapabilities({
         claudeSessions: statusData?.claudeSessions ?? 0,
+        codexSessions: statusData?.codexSessions ?? 0,
         gatewayConnected: statusData?.gateway ?? false,
         agentCount: agentsData?.total ?? 0,
         hasSkills: false,
@@ -317,6 +320,7 @@ function StepWelcome({ isGateway, capabilities, runtimeStatuses, runtimesLoading
 
   const installedCount = runtimeStatuses.filter(r => r.installed).length
   const totalCount = runtimeStatuses.length
+  const totalLocalSessions = capabilities.claudeSessions + capabilities.codexSessions
 
   return (
     <>
@@ -404,9 +408,9 @@ function StepWelcome({ isGateway, capabilities, runtimeStatuses, runtimesLoading
         {/* Live status chips */}
         <div className="flex flex-wrap items-center justify-center gap-2">
           <StatusChip
-            ok={capabilities.claudeSessions > 0}
-            label={capabilities.claudeSessions > 0
-              ? t('activeSessionsDetected', { count: capabilities.claudeSessions })
+            ok={totalLocalSessions > 0}
+            label={totalLocalSessions > 0
+              ? t('activeSessionsDetected', { count: totalLocalSessions })
               : t('noActiveSessions')}
           />
           <StatusChip

@@ -19,29 +19,31 @@ export async function GET(request: NextRequest) {
     const workspaceId = auth.user.workspace_id ?? 1;
     
     // Parse query parameters
-    const recipient = searchParams.get('recipient');
+    const recipientParam = searchParams.get('recipient');
+    const recipient = recipientParam && recipientParam !== 'all' ? recipientParam : null;
     const unread_only = searchParams.get('unread_only') === 'true';
     const type = searchParams.get('type');
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 500);
     const offset = parseInt(searchParams.get('offset') || '0');
     
-    if (!recipient) {
-      return NextResponse.json({ error: 'Recipient is required' }, { status: 400 });
+    const whereClauses = ['workspace_id = ?']
+    const params: any[] = [workspaceId];
+
+    if (recipient) {
+      whereClauses.push('recipient = ?')
+      params.push(recipient)
     }
     
-    // Build dynamic query
-    let query = 'SELECT * FROM notifications WHERE recipient = ? AND workspace_id = ?';
-    const params: any[] = [recipient, workspaceId];
-    
     if (unread_only) {
-      query += ' AND read_at IS NULL';
+      whereClauses.push('read_at IS NULL')
     }
     
     if (type) {
-      query += ' AND type = ?';
-      params.push(type);
+      whereClauses.push('type = ?')
+      params.push(type)
     }
-    
+
+    let query = `SELECT * FROM notifications WHERE ${whereClauses.join(' AND ')}`
     query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
     
@@ -103,30 +105,40 @@ export async function GET(request: NextRequest) {
     });
     
     // Get unread count for this recipient
+    const unreadWhere = ['workspace_id = ?', 'read_at IS NULL']
+    const unreadParams: any[] = [workspaceId]
+    if (recipient) {
+      unreadWhere.push('recipient = ?')
+      unreadParams.push(recipient)
+    }
     const unreadCount = db.prepare(`
       SELECT COUNT(*) as count 
       FROM notifications 
-      WHERE recipient = ? AND read_at IS NULL AND workspace_id = ?
-    `).get(recipient, workspaceId) as { count: number };
+      WHERE ${unreadWhere.join(' AND ')}
+    `).get(...unreadParams) as { count: number };
     
     // Get total count for pagination
-    let countQuery = 'SELECT COUNT(*) as total FROM notifications WHERE recipient = ? AND workspace_id = ?';
-    const countParams: any[] = [recipient, workspaceId];
-    if (unread_only) {
-      countQuery += ' AND read_at IS NULL';
-    }
-    if (type) {
-      countQuery += ' AND type = ?';
-      countParams.push(type);
-    }
+    let countQuery = `SELECT COUNT(*) as total FROM notifications WHERE ${whereClauses.join(' AND ')}`;
+    const countParams: any[] = [...params.slice(0, params.length - 2)];
     const countRow = db.prepare(countQuery).get(...countParams) as { total: number };
+
+    const recipientCounts = db.prepare(`
+      SELECT recipient,
+             COUNT(*) as total,
+             SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) as unread
+      FROM notifications
+      WHERE workspace_id = ?
+      GROUP BY recipient
+      ORDER BY unread DESC, total DESC, recipient COLLATE NOCASE ASC
+    `).all(workspaceId) as Array<{ recipient: string; total: number; unread: number }>
 
     return NextResponse.json({
       notifications: enhancedNotifications,
       total: countRow.total,
       page: Math.floor(offset / limit) + 1,
       limit,
-      unreadCount: unreadCount.count
+      unreadCount: unreadCount.count,
+      recipientCounts,
     });
   } catch (error) {
     logger.error({ err: error }, 'GET /api/notifications error');

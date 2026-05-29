@@ -23,6 +23,7 @@ import { WebhookPanel } from '@/components/panels/webhook-panel'
 import { SettingsPanel } from '@/components/panels/settings-panel'
 import { GatewayConfigPanel } from '@/components/panels/gateway-config-panel'
 import { IntegrationsPanel } from '@/components/panels/integrations-panel'
+import { OperitPanel } from '@/components/panels/operit-panel'
 import { AlertRulesPanel } from '@/components/panels/alert-rules-panel'
 import { MultiGatewayPanel } from '@/components/panels/multi-gateway-panel'
 import { GatewayControlPanel } from '@/components/panels/gateway-control-panel'
@@ -290,7 +291,7 @@ export default function Home() {
           // User explicitly chose a gateway URL — always set full mode
           setDashboardMode('full')
           setGatewayAvailable(true)
-          if (data?.claudeHome) {
+          if (data?.claudeHome || data?.codexHome || (Number(data?.claudeSessions || 0) + Number(data?.codexSessions || 0)) > 0) {
             setLocalSessionsAvailable(true)
           }
           setCapabilitiesChecked(true)
@@ -317,7 +318,7 @@ export default function Home() {
           setDashboardMode('full')
           setGatewayAvailable(true)
         }
-        if (data?.claudeHome) {
+        if (data?.claudeHome || data?.codexHome || (Number(data?.claudeSessions || 0) + Number(data?.codexSessions || 0)) > 0) {
           setLocalSessionsAvailable(true)
         }
         setCapabilitiesChecked(true)
@@ -581,6 +582,8 @@ function ContentRouter({ tab }: { tab: string }) {
       return <GatewayConfigPanel />
     case 'integrations':
       return <IntegrationsPanel />
+    case 'operit':
+      return <OperitPanel />
     case 'settings':
       return <SettingsPanel />
     case 'super-admin':

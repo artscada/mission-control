@@ -13,6 +13,7 @@ import { logger } from '@/lib/logger'
 import { detectProviderSubscriptions, getPrimarySubscription } from '@/lib/provider-subscriptions'
 import { APP_VERSION } from '@/lib/version'
 import { isHermesInstalled, scanHermesSessions } from '@/lib/hermes-sessions'
+import { scanCodexSessions } from '@/lib/codex-sessions'
 import { registerMcAsDashboard } from '@/lib/gateway-runtime'
 
 export async function GET(request: NextRequest) {
@@ -634,6 +635,9 @@ async function getCapabilities(request?: NextRequest) {
 
   const claudeProjectsPath = path.join(config.claudeHome, 'projects')
   const claudeHome = existsSync(claudeProjectsPath)
+  const codexSessionsPath = path.join(config.homeDir, '.codex', 'sessions')
+  const codexConfigTomlPath = path.join(config.homeDir, '.codex', 'config.toml')
+  const codexHome = existsSync(codexSessionsPath) || existsSync(codexConfigTomlPath)
 
   let claudeSessions = 0
   try {
@@ -644,6 +648,15 @@ async function getCapabilities(request?: NextRequest) {
     claudeSessions = row?.c ?? 0
   } catch {
     // claude_sessions table may not exist
+  }
+
+  let codexSessions = 0
+  if (codexHome) {
+    try {
+      codexSessions = scanCodexSessions(50).filter(s => s.isActive).length
+    } catch {
+      // ignore codex session scan failures
+    }
   }
 
   const subscriptions = detectProviderSubscriptions().active
@@ -710,7 +723,22 @@ async function getCapabilities(request?: NextRequest) {
 
   const isDocker = existsSync('/.dockerenv')
 
-  return { gateway, openclawHome, claudeHome, claudeSessions, hermesInstalled, hermesSessions, subscription, subscriptions, processUser, interfaceMode, dashboardRegistration, isDocker }
+  return {
+    gateway,
+    openclawHome,
+    claudeHome,
+    claudeSessions,
+    codexHome,
+    codexSessions,
+    hermesInstalled,
+    hermesSessions,
+    subscription,
+    subscriptions,
+    processUser,
+    interfaceMode,
+    dashboardRegistration,
+    isDocker,
+  }
 }
 
 function isPortOpen(host: string, port: number): Promise<boolean> {

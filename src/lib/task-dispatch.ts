@@ -8,6 +8,10 @@ import { config } from './config'
 import { getAllGatewaySessions } from './sessions'
 import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage } from './transcript-parser'
 import { syncTaskOutbound } from './github-sync-engine'
+import { executeOperitTask } from './integrations/operit/runner'
+import { ensureOperitAgentRecord, resolveOperitLinkedAgentName } from './integrations/operit/agent-link'
+import { OperitClient } from './integrations/operit/client'
+import { mapOperitDeviceRow, parseTaskMetadata } from './integrations/operit/utils'
 
 const AGENT_DISPATCH_ACCEPT_TIMEOUT_MS = 60_000
 
@@ -41,6 +45,73 @@ interface DispatchableTask {
   project_ticket_no: number | null
   project_id: number | null
   tags?: string[]
+}
+
+interface OperitDispatchContext {
+  integration?: string
+  deviceId?: number | null
+}
+
+function parseAgentConfig(raw: string | null | undefined): Record<string, any> {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getOperitDispatchContext(task: Pick<DispatchableTask, 'agent_config'>): OperitDispatchContext {
+  const config = parseAgentConfig(task.agent_config)
+  const operit = config.operit && typeof config.operit === 'object' ? config.operit : null
+  const deviceId = Number.parseInt(String(operit?.deviceId || ''), 10)
+  return {
+    integration: typeof config.integration === 'string' ? config.integration : undefined,
+    deviceId: Number.isFinite(deviceId) ? deviceId : null,
+  }
+}
+
+function isOperitHttpTask(task: Pick<DispatchableTask, 'agent_config'>): boolean {
+  return getOperitDispatchContext(task).integration === 'operit_http'
+}
+
+function preview(text: string, max = 240): string {
+  return text.length > max ? `${text.slice(0, max)}...` : text
+}
+
+function resolveOperitDeviceRow(db: ReturnType<typeof getDatabase>, task: DispatchableTask): any {
+  const metadata = (() => {
+    try {
+      const row = db.prepare('SELECT metadata FROM tasks WHERE id = ?').get(task.id) as { metadata?: string } | undefined
+      return parseTaskMetadata(row?.metadata)
+    } catch {
+      return {}
+    }
+  })()
+
+  const context = getOperitDispatchContext(task)
+  const metadataDeviceId = Number.parseInt(String(metadata?.operit?.device_id || ''), 10)
+  const explicitDeviceId = Number.isFinite(metadataDeviceId) ? metadataDeviceId : context.deviceId
+  const workspaceId = task.workspace_id
+
+  if (Number.isFinite(explicitDeviceId)) {
+    const byId = db.prepare(`
+      SELECT * FROM operit_devices
+      WHERE id = ? AND workspace_id = ? AND enabled = 1
+      LIMIT 1
+    `).get(explicitDeviceId, workspaceId) as any
+    if (byId) return byId
+  }
+
+  const byAgentLink = db.prepare(`
+    SELECT * FROM operit_devices
+    WHERE workspace_id = ? AND enabled = 1 AND (agent_name = ? OR name = ?)
+    ORDER BY CASE WHEN agent_name = ? THEN 0 ELSE 1 END, id ASC
+    LIMIT 1
+  `).get(workspaceId, task.assigned_to, task.assigned_to, task.assigned_to) as any
+
+  return byAgentLink || null
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,7 +1332,207 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       let agentResponse: AgentResponseParsed
       const useDirectApi = !isGatewayAvailable() && isDirectDispatchAvailable()
 
-      if (useDirectApi && !targetSession) {
+      if (isOperitHttpTask(task)) {
+        const deviceRow = resolveOperitDeviceRow(db, task)
+        if (!deviceRow) {
+          throw new Error(`Operit device is not linked for agent ${task.agent_name}`)
+        }
+
+        const device = mapOperitDeviceRow(deviceRow)
+        const linkedAgentName = resolveOperitLinkedAgentName(device)
+        const health = await new OperitClient(device).health()
+        const startedAt = Math.floor(Date.now() / 1000)
+        const mode = device.defaultMode === 'sync' ? 'sync' : 'sse'
+
+        db.prepare(`
+          UPDATE operit_devices
+          SET version_name = ?, last_health_status = ?, last_health_at = ?, updated_at = ?
+          WHERE id = ? AND workspace_id = ?
+        `).run(health.version_name || null, health.status || 'ok', startedAt, startedAt, device.id, task.workspace_id)
+
+        ensureOperitAgentRecord(db, task.workspace_id, {
+          ...device,
+          lastHealthStatus: health.status || 'ok',
+          lastHealthAt: startedAt,
+          versionName: health.version_name || null,
+        }, {
+          status: 'busy',
+          lastActivity: `Operit task starting: ${task.title}`,
+          now: startedAt,
+        })
+
+        const initialResult = db.prepare(`
+          INSERT INTO operit_runs (task_id, device_id, device_name, agent_name, mode, status, started_at, workspace_id)
+          VALUES (?, ?, ?, ?, ?, 'started', ?, ?)
+        `).run(task.id, device.id, device.name, linkedAgentName, mode, startedAt, task.workspace_id)
+        const runId = Number(initialResult.lastInsertRowid)
+
+        const nextMetadata = {
+          ...taskMeta,
+          executor_type: 'operit_http',
+          operit: {
+            ...(taskMeta.operit || {}),
+            device_id: device.id,
+            device_name: device.name,
+            mode,
+            last_run_id: runId,
+            group: 'mission-control',
+          },
+        }
+
+        db.prepare(`
+          UPDATE tasks
+          SET assigned_to = COALESCE(?, assigned_to),
+              error_message = NULL,
+              metadata = ?,
+              updated_at = ?
+          WHERE id = ? AND workspace_id = ?
+        `).run(linkedAgentName, JSON.stringify(nextMetadata), startedAt, task.id, task.workspace_id)
+
+        db_helpers.logActivity(
+          'operit_run_started',
+          'task',
+          task.id,
+          'scheduler',
+          `Started Operit run on ${device.name} for task ${task.title}`,
+          { runId, deviceId: device.id, mode },
+          task.workspace_id,
+        )
+
+        try {
+          const operitResult = await executeOperitTask({
+            task: { title: task.title, description: task.description || null },
+            device,
+            mode,
+            group: 'mission-control',
+          })
+
+          const finishedAt = Math.floor(Date.now() / 1000)
+          db.prepare(`
+            UPDATE operit_runs
+            SET request_id = ?, chat_id = ?, status = 'completed', prompt_text = ?, response_text = ?, raw_stream = ?, finished_at = ?
+            WHERE id = ? AND workspace_id = ?
+          `).run(
+            operitResult.requestId,
+            operitResult.chatId || null,
+            operitResult.prompt,
+            operitResult.aiResponse,
+            operitResult.rawStream || null,
+            finishedAt,
+            runId,
+            task.workspace_id,
+          )
+
+          const successMetadata = {
+            ...nextMetadata,
+            operit: {
+              ...(nextMetadata.operit || {}),
+              request_id: operitResult.requestId,
+              chat_id: operitResult.chatId,
+              last_run_id: runId,
+              last_status: 'completed',
+            },
+          }
+
+          db.prepare(`
+            UPDATE tasks
+            SET status = ?, outcome = ?, resolution = ?, error_message = NULL, metadata = ?, updated_at = ?, dispatch_attempts = 0
+            WHERE id = ? AND workspace_id = ?
+          `).run('review', 'success', operitResult.aiResponse, JSON.stringify(successMetadata), finishedAt, task.id, task.workspace_id)
+
+          db.prepare(`
+            INSERT INTO comments (task_id, author, content, created_at, workspace_id)
+            VALUES (?, ?, ?, ?, ?)
+          `).run(task.id, linkedAgentName, operitResult.aiResponse, finishedAt, task.workspace_id)
+
+          eventBus.broadcast('task.status_changed', {
+            id: task.id,
+            status: 'review',
+            previous_status: 'in_progress',
+          })
+
+          eventBus.broadcast('task.updated', {
+            id: task.id,
+            status: 'review',
+            assigned_to: linkedAgentName,
+            workspace_id: task.workspace_id,
+          })
+
+          db_helpers.logActivity(
+            'operit_run_completed',
+            'task',
+            task.id,
+            'scheduler',
+            `Completed Operit run on ${device.name} for task ${task.title}`,
+            { runId, deviceId: device.id, requestId: operitResult.requestId, chatId: operitResult.chatId, preview: preview(operitResult.aiResponse) },
+            task.workspace_id,
+          )
+
+          ensureOperitAgentRecord(db, task.workspace_id, {
+            ...device,
+            lastHealthStatus: health.status || 'ok',
+            lastHealthAt: finishedAt,
+            versionName: health.version_name || null,
+          }, {
+            status: 'idle',
+            lastActivity: `Operit task completed: ${task.title}`,
+            now: finishedAt,
+          })
+
+          syncAndEscalateIfFailed(task, 'review')
+          results.push({ id: task.id, success: true })
+          logger.info({ taskId: task.id, agent: task.agent_name, device: device.name }, 'Task dispatched and completed via Operit')
+          continue
+        } catch (operitErr: any) {
+          const failureTime = Math.floor(Date.now() / 1000)
+          const failureMessage = operitErr?.message ? String(operitErr.message) : 'Unknown Operit execution error'
+
+          db.prepare(`
+            UPDATE operit_runs
+            SET status = 'failed', error_message = ?, finished_at = ?
+            WHERE id = ? AND workspace_id = ?
+          `).run(failureMessage.substring(0, 5000), failureTime, runId, task.workspace_id)
+
+          const failureMetadata = {
+            ...nextMetadata,
+            operit: {
+              ...(nextMetadata.operit || {}),
+              last_run_id: runId,
+              last_status: 'failed',
+              last_error: failureMessage.substring(0, 1000),
+            },
+          }
+
+          db.prepare(`
+            UPDATE tasks
+            SET metadata = ?, updated_at = ?
+            WHERE id = ? AND workspace_id = ?
+          `).run(JSON.stringify(failureMetadata), failureTime, task.id, task.workspace_id)
+
+          ensureOperitAgentRecord(db, task.workspace_id, {
+            ...device,
+            lastHealthStatus: `error:${failureMessage.substring(0, 120)}`,
+            lastHealthAt: failureTime,
+            versionName: health.version_name || null,
+          }, {
+            status: 'error',
+            lastActivity: `Operit task failed: ${task.title}`,
+            now: failureTime,
+          })
+
+          db_helpers.logActivity(
+            'operit_run_failed',
+            'task',
+            task.id,
+            'scheduler',
+            `Operit run failed on ${device.name} for task ${task.title}: ${failureMessage.substring(0, 200)}`,
+            { runId, deviceId: device.id, error: failureMessage.substring(0, 1000) },
+            task.workspace_id,
+          )
+
+          throw operitErr
+        }
+      } else if (useDirectApi && !targetSession) {
         // Direct API dispatch — provider chosen by `dispatchModel` prefix
         // (Anthropic / OpenAI / OpenAI-compatible local). No gateway needed.
         agentResponse = await callDirectly(task, prompt)

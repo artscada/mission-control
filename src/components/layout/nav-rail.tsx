@@ -76,6 +76,7 @@ const navGroups: NavGroup[] = [
         ],
       },
       { id: 'integrations', label: 'Integrations', icon: <IntegrationsIcon />, priority: false },
+      { id: 'operit', label: 'Operit', icon: <IntegrationsIcon />, priority: false },
       { id: 'debug', label: 'Debug', icon: <DebugIcon />, priority: false },
       { id: 'settings', label: 'Settings', icon: <SettingsIcon />, priority: false, essential: true },
     ],
@@ -829,7 +830,7 @@ function ContextSwitcher({ currentUser, isAdmin, isLocal, isConnected, tenants, 
   const unlinkedOsUsers = osUsers.filter(u => !linkedUsernames.has(u.username) && !u.is_process_owner)
   const [open, setOpen] = useState(false)
   const [createMode, setCreateMode] = useState(false)
-  const [createForm, setCreateForm] = useState({ username: '', display_name: '', gateway_port: '', install_openclaw: true, install_claude: false, install_codex: false })
+  const [createForm, setCreateForm] = useState({ username: '', display_name: '', gateway_port: '', install_openclaw: true, install_claude: false, install_codex: true })
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
@@ -1073,7 +1074,7 @@ function ContextSwitcher({ currentUser, isAdmin, isLocal, isConnected, tenants, 
                         onClick={() => { if (!disabled) { navigateToPanel('super-admin'); setOpen(false) } }}
                         disabled={disabled}
                         title={disabled
-                          ? `${osUser.username} — no claude or codex installed at ${osUser.home_dir}`
+                          ? `${osUser.username} — no codex or claude installed at ${osUser.home_dir}`
                           : `${osUser.home_dir} (uid ${osUser.uid}) — click to provision as organization`
                         }
                         className={`w-full flex items-center gap-2 px-2 py-1.5 h-auto rounded-md text-xs justify-start ${
@@ -1201,7 +1202,7 @@ function ContextSwitcher({ currentUser, isAdmin, isLocal, isConnected, tenants, 
                               })
                               const json = await res.json().catch(() => ({}))
                               if (!res.ok) throw new Error(json?.error || 'Failed to create organization')
-                              setCreateForm({ username: '', display_name: '', gateway_port: '', install_openclaw: true, install_claude: false, install_codex: false })
+                              setCreateForm({ username: '', display_name: '', gateway_port: '', install_openclaw: true, install_claude: false, install_codex: true })
                               setCreateMode(false)
                               await Promise.all([fetchTenants(), fetchOsUsers()])
                             } catch (e: any) {

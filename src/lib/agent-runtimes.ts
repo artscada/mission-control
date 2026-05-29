@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { config } from './config'
@@ -215,7 +215,7 @@ const RUNTIME_META: Record<RuntimeId, RuntimeMeta> = {
     name: 'Codex CLI',
     description: 'OpenAI CLI agent for code generation and editing.',
     authRequired: true,
-    authHint: 'Run "codex auth" after install to authenticate.',
+    authHint: 'Run "codex auth" or configure ~/.codex/config.toml with a provider such as OmniRoute.',
   },
   opencode: {
     name: 'OpenCode',
@@ -383,6 +383,145 @@ function detectBinary(bins: string[], versionFlag = '--version'): { installed: b
   return { installed: false, version: null, resolvedBin: null }
 }
 
+function unquoteTomlString(raw: string): string {
+  const trimmed = raw.trim()
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed
+}
+
+function stripTomlComment(line: string): string {
+  let quote: 'single' | 'double' | null = null
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"' && quote !== 'single') {
+      quote = quote === 'double' ? null : 'double'
+      continue
+    }
+    if (ch === "'" && quote !== 'double') {
+      quote = quote === 'single' ? null : 'single'
+      continue
+    }
+    if (ch === '#' && !quote) {
+      return line.slice(0, i).trim()
+    }
+  }
+  return line.trim()
+}
+
+interface ParsedCodexToml {
+  root: Record<string, string>
+  providers: Record<string, Record<string, string>>
+}
+
+function parseCodexTomlConfig(raw: string): ParsedCodexToml {
+  const parsed: ParsedCodexToml = { root: {}, providers: {} }
+  let section = ''
+
+  for (const originalLine of raw.split(/\r?\n/)) {
+    const line = stripTomlComment(originalLine)
+    if (!line) continue
+
+    const sectionMatch = line.match(/^\[(.+)]$/)
+    if (sectionMatch) {
+      section = sectionMatch[1].trim()
+      continue
+    }
+
+    const eqIndex = line.indexOf('=')
+    if (eqIndex <= 0) continue
+
+    const key = line.slice(0, eqIndex).trim()
+    const value = unquoteTomlString(line.slice(eqIndex + 1).trim())
+    if (!key) continue
+
+    const providerMatch = section.match(/^model_providers\.(.+)$/)
+    if (providerMatch) {
+      const providerId = providerMatch[1].trim()
+      parsed.providers[providerId] ||= {}
+      parsed.providers[providerId][key] = value
+      continue
+    }
+
+    if (!section) {
+      parsed.root[key] = value
+    }
+  }
+
+  return parsed
+}
+
+function detectCodexAuthFromConfigToml(homedir: string): boolean {
+  try {
+    const configPath = join(homedir, '.codex', 'config.toml')
+    if (!existsSync(configPath)) return false
+
+    const parsed = parseCodexTomlConfig(readFileSync(configPath, 'utf8'))
+    const providerId = parsed.root.model_provider || ''
+    const model = parsed.root.model || ''
+    if (!providerId && !model) return false
+
+    const provider = providerId ? parsed.providers[providerId] || {} : {}
+    const envKey = (provider.env_key || '').trim()
+    const baseUrl = (provider.base_url || '').trim()
+    const wireApi = (provider.wire_api || '').trim()
+
+    if (envKey && (process.env[envKey] || '').trim()) {
+      return true
+    }
+
+    // Some custom providers are fully declared in config.toml and may rely on
+    // external secret injection that does not create auth.json on disk.
+    if (!envKey && providerId && baseUrl && wireApi) {
+      return true
+    }
+  } catch {
+    // ignore parse errors
+  }
+
+  return false
+}
+
+function readCodexCliPathFromConfigToml(homedir: string): string | null {
+  try {
+    const configPath = join(homedir, '.codex', 'config.toml')
+    if (!existsSync(configPath)) return null
+    const raw = readFileSync(configPath, 'utf8')
+    const match = raw.match(/(^|\n)\s*CODEX_CLI_PATH\s*=\s*['"]([^'"]+)['"]/)
+    return match?.[2]?.trim() || null
+  } catch {
+    return null
+  }
+}
+
+function listCodexBinaryCandidates(): string[] {
+  const homedir = require('node:os').homedir()
+  const path = require('node:path')
+  const candidates: string[] = []
+
+  const configCodexPath = readCodexCliPathFromConfigToml(homedir)
+  if (configCodexPath) candidates.push(configCodexPath)
+
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || path.join(homedir, 'AppData', 'Local')
+    const codexBinRoot = path.join(localAppData, 'OpenAI', 'Codex', 'bin')
+    if (existsSync(codexBinRoot)) {
+      try {
+        for (const entry of readdirSync(codexBinRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue
+          candidates.push(path.join(codexBinRoot, entry.name, 'codex.exe'))
+        }
+      } catch {
+        // ignore discovery errors
+      }
+    }
+  }
+
+  candidates.push('codex', 'codex-cli')
+  return Array.from(new Set(candidates))
+}
+
 function detectClaude(): RuntimeStatus {
   const meta = RUNTIME_META.claude
   const { installed, version, resolvedBin } = detectBinary(['claude'])
@@ -451,9 +590,10 @@ function detectClaude(): RuntimeStatus {
 
 function detectCodex(): RuntimeStatus {
   const meta = RUNTIME_META.codex
-  const { installed, version } = detectBinary(['codex', 'codex-cli'])
+  const { installed, version } = detectBinary(listCodexBinaryCandidates())
 
-  // Codex CLI authenticates via OPENAI_API_KEY env var or config files
+  // Codex CLI may authenticate via OPENAI auth, auth.json, or a custom
+  // provider declared in ~/.codex/config.toml (for example OmniRoute).
   let authenticated = false
   if (installed) {
     try {
@@ -463,6 +603,7 @@ function detectCodex(): RuntimeStatus {
         || existsSync(path.join(homedir, '.codex', 'auth.json'))
         || existsSync(path.join(homedir, '.codex', 'config.json'))
         || existsSync(path.join(homedir, '.config', 'codex', 'config.json'))
+        || detectCodexAuthFromConfigToml(homedir)
     } catch {
       // ignore
     }
@@ -483,8 +624,8 @@ function detectOpenCode(): RuntimeStatus {
 const DETECTORS: Record<RuntimeId, () => RuntimeStatus> = {
   openclaw: detectOpenClaw,
   hermes: detectHermes,
-  claude: detectClaude,
   codex: detectCodex,
+  claude: detectClaude,
   opencode: detectOpenCode,
 }
 

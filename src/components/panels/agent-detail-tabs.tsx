@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
 import { createClientLogger } from '@/lib/client-logger'
+import { summarizeAgentResponse } from '@/lib/agent-response'
 import Link from 'next/link'
 
 const log = createClientLogger('AgentDetailTabs')
@@ -21,6 +22,9 @@ interface Agent {
   last_activity?: string
   created_at: number
   updated_at: number
+  config?: any
+  source?: string
+  runtime_type?: string
   taskStats?: {
     total: number
     assigned: number
@@ -97,8 +101,11 @@ export function OverviewTab({
   const t = useTranslations('agentDetail')
   const [messageFrom, setMessageFrom] = useState('system')
   const [directMessage, setDirectMessage] = useState('')
-  const [messageStatus, setMessageStatus] = useState<string | null>(null)
+  const [messageStatus, setMessageStatus] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
+  const [messageResponse, setMessageResponse] = useState<string | null>(null)
   const [availableModels, setAvailableModels] = useState<Array<{ alias: string; description?: string }>>([])
+  const operitInfo = (agent as any).config?.operit
+  const isOperitAgent = agent.source === 'operit' || (agent as any).config?.integration === 'operit_http'
 
   useEffect(() => {
     fetch('/api/status?action=models')
@@ -114,6 +121,7 @@ export function OverviewTab({
     if (!directMessage.trim()) return
     try {
       setMessageStatus(null)
+      setMessageResponse(null)
       const response = await fetch('/api/agents/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -125,11 +133,17 @@ export function OverviewTab({
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Failed to send message')
+      const agentResponse = summarizeAgentResponse(data.response ?? data.responsePreview)
       setDirectMessage('')
-      setMessageStatus(t('messageSent'))
+      setMessageStatus({
+        tone: agentResponse?.isError ? 'error' : 'success',
+        text: agentResponse?.isError ? agentResponse.text : t('messageSent')
+      })
+      setMessageResponse(agentResponse?.text || null)
       setTimeout(() => setMessageStatus(null), 2000)
-    } catch (error) {
-      setMessageStatus(t('messageFailed'))
+    } catch (error: any) {
+      setMessageStatus({ tone: 'error', text: error?.message || t('messageFailed') })
+      setMessageResponse(null)
     }
   }
 
@@ -245,6 +259,35 @@ export function OverviewTab({
               )}
             </div>
 
+            {isOperitAgent && (
+              <>
+                <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
+                  <span className="text-muted-foreground">Transport</span>
+                  <span className="text-foreground font-mono text-xs">Operit HTTP</span>
+                </div>
+                <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
+                  <span className="text-muted-foreground">Device</span>
+                  <span className="text-foreground text-xs">{operitInfo?.deviceName || agent.name}</span>
+                </div>
+                <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
+                  <span className="text-muted-foreground">Base URL</span>
+                  <span className="text-foreground font-mono text-xs break-all">{operitInfo?.baseUrl || 'unknown'}</span>
+                </div>
+                <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
+                  <span className="text-muted-foreground">Version</span>
+                  <span className="text-foreground text-xs">{operitInfo?.versionName || 'unknown'}</span>
+                </div>
+                <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
+                  <span className="text-muted-foreground">Health</span>
+                  <span className="text-foreground text-xs">{operitInfo?.lastHealthStatus || 'unknown'}</span>
+                </div>
+                <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
+                  <span className="text-muted-foreground">Mode</span>
+                  <span className="text-foreground text-xs">{operitInfo?.defaultMode || 'default'}</span>
+                </div>
+              </>
+            )}
+
             <div className="grid grid-cols-[100px_1fr] gap-2 items-center text-sm">
               <span className="text-muted-foreground">{t('created')}</span>
               <span className="text-xs text-muted-foreground">{new Date(agent.created_at * 1000).toLocaleDateString()}</span>
@@ -304,8 +347,8 @@ export function OverviewTab({
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-sm font-medium text-foreground">{t('message')}</h4>
             {messageStatus && (
-              <span className={`text-xs ${messageStatus === 'Sent' ? 'text-green-400' : 'text-rose-400'}`}>
-                {messageStatus}
+              <span className={`text-xs ${messageStatus.tone === 'success' ? 'text-green-400' : 'text-rose-400'}`}>
+                {messageStatus.text}
               </span>
             )}
           </div>
@@ -321,8 +364,13 @@ export function OverviewTab({
               value={directMessage}
               onChange={(e) => setDirectMessage(e.target.value)}
               className="flex-1 min-h-[80px] bg-surface-1 text-foreground rounded px-2.5 py-2 text-sm border border-border focus:outline-none focus:ring-1 focus:ring-primary/50 resize-none"
-              placeholder={t('sendMessagePlaceholder', { name: agent.name })}
+              placeholder={isOperitAgent ? `Отправить команду на устройство ${agent.name}...` : t('sendMessagePlaceholder', { name: agent.name })}
             />
+            {messageResponse && (
+              <div className="rounded border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-foreground whitespace-pre-wrap">
+                {messageResponse}
+              </div>
+            )}
             <div className="flex justify-end">
               <Button type="submit" size="sm" disabled={!directMessage.trim()}>
                 {t('send')}

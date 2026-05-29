@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
+import { OperitPreviewImage } from '@/components/ui/operit-preview-image'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 import { createClientLogger } from '@/lib/client-logger'
 import { AgentAvatar } from '@/components/ui/agent-avatar'
@@ -93,6 +94,18 @@ const statusCardStyles: Record<string, { edge: string; glow: string; dot: string
   },
 }
 
+function isOperitAgent(agent: Agent | null | undefined): boolean {
+  if (!agent) return false
+  const config = (agent as any).config
+  return (agent as any).source === 'operit' || config?.integration === 'operit_http'
+}
+
+function getOperitDeviceId(agent: Agent | null | undefined): number | null {
+  const raw = (agent as any)?.config?.operit?.deviceId
+  const parsed = Number.parseInt(String(raw ?? ''), 10)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 export function AgentSquadPanelPhase3() {
   const t = useTranslations('agentSquadPhase3')
   const { agents, setAgents } = useMissionControl()
@@ -105,6 +118,8 @@ export function AgentSquadPanelPhase3() {
   const [syncing, setSyncing] = useState(false)
   const [syncToast, setSyncToast] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
+  const [previewTick, setPreviewTick] = useState(0)
+  const [detailInitialTab, setDetailInitialTab] = useState<'overview' | 'live'>('overview')
 
   // Sync agents from gateway config or local disk
   const syncFromConfig = async (source?: 'local') => {
@@ -168,6 +183,14 @@ export function AgentSquadPanelPhase3() {
 
   // Smart polling with visibility pause
   useSmartPoll(fetchAgents, 30000, { enabled: autoRefresh, pauseWhenSseConnected: true })
+
+  useEffect(() => {
+    if (!autoRefresh) return
+    const timer = window.setInterval(() => {
+      setPreviewTick((tick) => tick + 1)
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [autoRefresh])
 
   // Update agent status
   const updateAgentStatus = async (agentName: string, status: Agent['status'], activity?: string) => {
@@ -419,12 +442,17 @@ export function AgentSquadPanelPhase3() {
             {agents.map(agent => {
               const modelName = formatModelName(agent.config)
               const taskStatsLine = buildTaskStatParts(agent.taskStats)
+              const operitAgent = isOperitAgent(agent)
+              const operitDeviceId = getOperitDeviceId(agent)
 
               return (
                 <div
                   key={agent.id}
                   className="group relative overflow-hidden rounded-xl border border-border/70 bg-card p-4 transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-border hover:shadow-lg cursor-pointer"
-                  onClick={() => setSelectedAgent(agent)}
+                  onClick={() => {
+                    setDetailInitialTab('overview')
+                    setSelectedAgent(agent)
+                  }}
                 >
                   <div className={`pointer-events-none absolute inset-y-0 left-0 w-1 bg-gradient-to-b ${(statusCardStyles[agent.status] || defaultCardStyle).edge}`} />
                   {agent.hidden ? <div className="absolute top-2 right-2 text-2xs text-slate-500">hidden</div> : null}
@@ -478,6 +506,27 @@ export function AgentSquadPanelPhase3() {
                     </div>
                   )}
 
+                  {operitAgent && (
+                    <div className="mb-2 overflow-hidden rounded-lg border border-border/50 bg-slate-950/80">
+                      <div className="flex items-center justify-between border-b border-white/10 px-2.5 py-1.5 text-[11px] text-muted-foreground/70">
+                        <span>Live preview</span>
+                        <span className="font-mono">{operitDeviceId ? `device ${operitDeviceId}` : 'unlinked'}</span>
+                      </div>
+                      <OperitPreviewImage
+                        alt={`Live preview for ${agent.name}`}
+                        deviceId={operitDeviceId}
+                        tick={previewTick}
+                        display="main"
+                        format="jpg"
+                        quality={46}
+                        scale={26}
+                        wrapperClassName="h-36 w-full"
+                        imageClassName="h-full w-full object-cover"
+                        fallbackText="No screen preview"
+                      />
+                    </div>
+                  )}
+
                   {/* Footer: last seen + actions */}
                   <div className="flex items-center justify-between mt-2 pt-2 border-t border-border/30">
                     <span className="text-[11px] text-muted-foreground/70">
@@ -509,6 +558,20 @@ export function AgentSquadPanelPhase3() {
                           className="h-6 px-2 text-xs"
                         >
                           {t('wake')}
+                        </Button>
+                      )}
+                      {operitAgent && (
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setDetailInitialTab('live')
+                            setSelectedAgent(agent)
+                          }}
+                          size="xs"
+                          variant="ghost"
+                          className="h-6 px-2 text-xs text-emerald-300 hover:bg-emerald-500/15 hover:text-emerald-200"
+                        >
+                          Live
                         </Button>
                       )}
                       <Button
@@ -547,6 +610,7 @@ export function AgentSquadPanelPhase3() {
       {selectedAgent && (
         <AgentDetailModalPhase3
           agent={selectedAgent}
+          initialTab={detailInitialTab}
           onClose={() => setSelectedAgent(null)}
           onUpdate={fetchAgents}
           onStatusUpdate={updateAgentStatus}
@@ -581,6 +645,7 @@ export function AgentSquadPanelPhase3() {
 // Enhanced Agent Detail Modal with Tabs
 function AgentDetailModalPhase3({
   agent,
+  initialTab,
   onClose,
   onUpdate,
   onStatusUpdate,
@@ -588,6 +653,7 @@ function AgentDetailModalPhase3({
   onDelete
 }: {
   agent: Agent
+  initialTab?: 'overview' | 'live'
   onClose: () => void
   onUpdate: () => void
   onStatusUpdate: (name: string, status: Agent['status'], activity?: string) => Promise<void>
@@ -595,7 +661,7 @@ function AgentDetailModalPhase3({
   onDelete: (agentId: number, removeWorkspace: boolean) => Promise<void>
 }) {
   const [agentState, setAgentState] = useState<Agent & { config?: any; working_memory?: string }>(agent as Agent & { config?: any; working_memory?: string })
-  const [activeTab, setActiveTab] = useState<'overview' | 'soul' | 'memory' | 'config' | 'tasks' | 'activity' | 'files' | 'tools' | 'channels' | 'cron' | 'models'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'live' | 'soul' | 'memory' | 'config' | 'tasks' | 'activity' | 'files' | 'tools' | 'channels' | 'cron' | 'models'>(initialTab || 'overview')
   const [editing, setEditing] = useState(false)
   const [formData, setFormData] = useState({
     role: agent.role,
@@ -632,6 +698,7 @@ function AgentDetailModalPhase3({
 
   useEffect(() => {
     setAgentState(agent as Agent & { config?: any; working_memory?: string })
+    setActiveTab(initialTab || 'overview')
     setFormData({
       role: agent.role,
       session_key: agent.session_key || '',
@@ -639,7 +706,7 @@ function AgentDetailModalPhase3({
       working_memory: (agent as any).working_memory || '',
       model: (() => { const p = (agent as any).config?.model?.primary; return (typeof p === 'string' ? p : p?.primary) || '' })(),
     })
-  }, [agent])
+  }, [agent, initialTab])
 
   useEffect(() => {
     const loadCanonicalAgentData = async () => {
@@ -822,6 +889,7 @@ function AgentDetailModalPhase3({
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: 'O' },
+    ...(isOperitAgent(agentState) ? [{ id: 'live', label: 'Live', icon: 'L' }] : []),
     { id: 'files', label: 'Files', icon: 'F' },
     { id: 'tools', label: 'Tools', icon: 'W' },
     { id: 'models', label: 'Models', icon: 'P' },
@@ -988,6 +1056,10 @@ function AgentDetailModalPhase3({
               onPerformHeartbeat={performHeartbeat}
             />
           )}
+
+          {activeTab === 'live' && (
+            <OperitLiveTab agent={agentState} />
+          )}
           
           {activeTab === 'soul' && (
             <SoulTab
@@ -1043,6 +1115,104 @@ function AgentDetailModalPhase3({
             <ActivityTab agent={agentState} />
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function OperitLiveTab({ agent }: { agent: Agent }) {
+  const deviceId = getOperitDeviceId(agent)
+  const operitEnabled = isOperitAgent(agent) && !!deviceId
+  const [display, setDisplay] = useState<'main' | 'virtual'>('main')
+  const [liveRefresh, setLiveRefresh] = useState(true)
+  const [tick, setTick] = useState(0)
+
+  useEffect(() => {
+    setDisplay('main')
+    setLiveRefresh(true)
+    setTick(0)
+  }, [agent.id])
+
+  useEffect(() => {
+    if (!operitEnabled || !liveRefresh) return
+    const timer = window.setInterval(() => {
+      setTick((value) => value + 1)
+    }, 1200)
+    return () => window.clearInterval(timer)
+  }, [display, liveRefresh, operitEnabled])
+
+  if (!operitEnabled || !deviceId) {
+    return (
+      <div className="p-5">
+        <div className="rounded-xl border border-border bg-card/40 p-4 text-sm text-muted-foreground">
+          Live preview is available only for linked Operit HTTP agents.
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-medium text-foreground">Live Device Panel</h4>
+          <p className="text-xs text-muted-foreground">
+            Device {deviceId} via Operit HTTP. Main display uses standard screen capture; virtual display works only when Operit already has an active virtual screen.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            size="xs"
+            variant={display === 'main' ? 'success' : 'ghost'}
+            onClick={() => setDisplay('main')}
+          >
+            Main display
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant={display === 'virtual' ? 'success' : 'ghost'}
+            onClick={() => setDisplay('virtual')}
+          >
+            Virtual display
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant={liveRefresh ? 'success' : 'secondary'}
+            onClick={() => setLiveRefresh((value) => !value)}
+          >
+            {liveRefresh ? 'Live' : 'Paused'}
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="secondary"
+            onClick={() => setTick((value) => value + 1)}
+          >
+            Refresh now
+          </Button>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-2xl border border-border bg-black shadow-inner shadow-black/40">
+        <OperitPreviewImage
+          alt={`Live device preview for ${agent.name}`}
+          deviceId={deviceId}
+          tick={tick}
+          display={display}
+          format="jpg"
+          quality={68}
+          scale={75}
+          wrapperClassName="aspect-[9/19.5] w-full bg-black"
+          imageClassName="h-full w-full object-contain"
+          fallbackText={display === 'virtual' ? 'Virtual display not ready' : 'Preview unavailable'}
+        />
+      </div>
+
+      <div className="rounded-xl border border-border bg-card/40 px-4 py-3 text-xs text-muted-foreground">
+        Squad thumbnails refresh slowly for the whole farm. This panel refreshes only for the currently selected device, so Mission Control can stay responsive even with many phones online.
       </div>
     </div>
   )

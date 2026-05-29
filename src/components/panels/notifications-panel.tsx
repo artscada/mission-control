@@ -19,18 +19,24 @@ interface Notification {
   created_at: number
 }
 
+interface RecipientSummary {
+  recipient: string
+  total: number
+  unread: number
+}
+
 export function NotificationsPanel() {
   const t = useTranslations('notifications')
   const [recipient, setRecipient] = useState<string>(() => {
-    if (typeof window === 'undefined') return ''
-    return window.localStorage.getItem('mc.notifications.recipient') || ''
+    if (typeof window === 'undefined') return 'all'
+    return window.localStorage.getItem('mc.notifications.recipient') || 'all'
   })
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const [recipientOptions, setRecipientOptions] = useState<RecipientSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const fetchNotifications = useCallback(async () => {
-    if (!recipient) return
     try {
       setLoading(true)
       setError(null)
@@ -38,6 +44,7 @@ export function NotificationsPanel() {
       if (!response.ok) throw new Error('Failed to fetch notifications')
       const data = await response.json()
       setNotifications(data.notifications || [])
+      setRecipientOptions(data.recipientCounts || [])
     } catch (err) {
       setError('Failed to fetch notifications')
     } finally {
@@ -46,16 +53,14 @@ export function NotificationsPanel() {
   }, [recipient])
 
   useEffect(() => {
-    if (recipient) {
-      window.localStorage.setItem('mc.notifications.recipient', recipient)
-      fetchNotifications()
-    }
+    window.localStorage.setItem('mc.notifications.recipient', recipient || 'all')
+    fetchNotifications()
   }, [recipient, fetchNotifications])
 
-  useSmartPoll(fetchNotifications, 30000, { enabled: !!recipient, pauseWhenSseConnected: true })
+  useSmartPoll(fetchNotifications, 30000, { enabled: true, pauseWhenSseConnected: true })
 
   const markAllRead = async () => {
-    if (!recipient) return
+    if (!recipient || recipient === 'all') return
     try {
       const res = await fetch('/api/notifications', {
         method: 'PUT',
@@ -91,12 +96,13 @@ export function NotificationsPanel() {
           onClick={markAllRead}
           variant="secondary"
           size="sm"
+          disabled={recipient === 'all' || notifications.length === 0}
         >
           {t('markAllRead')}
         </Button>
       </div>
 
-      <div className="p-4 border-b border-border flex-shrink-0">
+      <div className="p-4 border-b border-border flex-shrink-0 space-y-3">
         <label className="block text-sm text-muted-foreground mb-2">{t('recipientLabel')}</label>
         <input
           value={recipient}
@@ -104,6 +110,25 @@ export function NotificationsPanel() {
           className="w-full bg-surface-1 text-foreground rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50"
           placeholder={t('recipientPlaceholder')}
         />
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant={recipient === 'all' ? 'secondary' : 'outline'}
+            size="xs"
+            onClick={() => setRecipient('all')}
+          >
+            {t('allRecipients')}
+          </Button>
+          {recipientOptions.map((option) => (
+            <Button
+              key={option.recipient}
+              variant={recipient === option.recipient ? 'secondary' : 'outline'}
+              size="xs"
+              onClick={() => setRecipient(option.recipient)}
+            >
+              {option.recipient} {option.unread > 0 ? `(${option.unread})` : ''}
+            </Button>
+          ))}
+        </div>
       </div>
 
       {error && (
@@ -137,6 +162,9 @@ export function NotificationsPanel() {
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-foreground">{n.title}</div>
                   <div className="text-xs text-muted-foreground/60">{n.type}</div>
+                  {recipient === 'all' && (
+                    <div className="text-xs text-primary/80 mt-1">{n.recipient}</div>
+                  )}
                 </div>
                 {!n.read_at && (
                   <Button

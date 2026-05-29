@@ -82,6 +82,14 @@ interface Project {
   status: 'active' | 'archived'
 }
 
+interface OperitDeviceOption {
+  id: number
+  name: string
+  baseUrl: string
+  agentName?: string | null
+  defaultMode: 'sync' | 'sse' | 'async_callback'
+}
+
 interface MentionOption {
   handle: string
   recipient: string
@@ -392,7 +400,7 @@ interface SpawnFormData {
 export function TaskBoardPanel() {
   const t = useTranslations('taskBoard')
   const statusColumns = STATUS_COLUMN_KEYS.map(col => ({ ...col, title: t(col.titleKey as any) }))
-  const { tasks: storeTasks, setTasks: storeSetTasks, selectedTask, setSelectedTask, activeProject, availableModels, spawnRequests, addSpawnRequest, updateSpawnRequest, dashboardMode } = useMissionControl()
+  const { tasks: storeTasks, setTasks: storeSetTasks, selectedTask, setSelectedTask, activeProject, setActiveProject, availableModels, spawnRequests, addSpawnRequest, updateSpawnRequest, dashboardMode } = useMissionControl()
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -468,6 +476,13 @@ export function TaskBoardPanel() {
       const tasksData = await tasksResponse.json()
       const agentsData = await agentsResponse.json()
       const projectsData = await projectsResponse.json()
+      const projectList = projectsData.projects || []
+
+      if (projectFilter !== 'all' && !projectList.some((project: Project) => String(project.id) === projectFilter)) {
+        setActiveProject(null)
+        setProjectFilter('all')
+        return
+      }
 
       const tasksList = tasksData.tasks || []
       const taskIds = tasksList.map((task: Task) => task.id)
@@ -475,7 +490,7 @@ export function TaskBoardPanel() {
       // Render primary board data first; hydrate Aegis approvals in background.
       storeSetTasks(tasksList)
       setAgents(agentsData.agents || [])
-      setProjects(projectsData.projects || [])
+      setProjects(projectList)
 
       if (taskIds.length > 0) {
         fetch(`/api/quality-review?taskIds=${taskIds.join(',')}`)
@@ -501,7 +516,7 @@ export function TaskBoardPanel() {
     } finally {
       setLoading(false)
     }
-  }, [projectFilter, storeSetTasks])
+  }, [projectFilter, setActiveProject, storeSetTasks])
 
   useEffect(() => {
     fetchData()
@@ -564,6 +579,10 @@ export function TaskBoardPanel() {
     })
     return acc
   }, {} as Record<string, Task[]>)
+
+  const filteredProjectName = projectFilter === 'all'
+    ? null
+    : projects.find((project) => String(project.id) === projectFilter)?.name || projectFilter
 
   // Drag and drop handlers
   const handleDragStart = (e: React.DragEvent, task: Task) => {
@@ -802,7 +821,11 @@ export function TaskBoardPanel() {
           <div className="relative">
             <select
               value={projectFilter}
-              onChange={(e) => setProjectFilter(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                setProjectFilter(next)
+                setActiveProject(next === 'all' ? null : (projects.find((project) => String(project.id) === next) || null))
+              }}
               className="h-9 px-3 pr-8 bg-surface-1 text-foreground border border-border rounded-md text-sm appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/50"
             >
               <option value="all">{t('allProjects')}</option>
@@ -927,6 +950,18 @@ export function TaskBoardPanel() {
             aria-label={t('dismissError')}
           >
             ×
+          </Button>
+        </div>
+      )}
+
+      {!loading && !error && tasks.length === 0 && projectFilter !== 'all' && (
+        <div className="mx-4 mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 flex items-center justify-between gap-3">
+          <span>{t('filteredEmptyState', { project: filteredProjectName || projectFilter })}</span>
+          <Button variant="secondary" size="sm" onClick={() => {
+            setProjectFilter('all')
+            setActiveProject(null)
+          }}>
+            {t('allProjects')}
           </Button>
         </div>
       )}
@@ -1233,6 +1268,12 @@ function TaskDetailModal({
   const mentionTargets = useMentionTargets()
   const [activeTab, setActiveTab] = useState<'details' | 'comments' | 'quality' | 'session'>('details')
   const [reviewer, setReviewer] = useState('aegis')
+  const [operitDevices, setOperitDevices] = useState<OperitDeviceOption[]>([])
+  const [loadingOperitDevices, setLoadingOperitDevices] = useState(false)
+  const [selectedOperitDeviceId, setSelectedOperitDeviceId] = useState('')
+  const [operitMode, setOperitMode] = useState<'sync' | 'sse'>('sse')
+  const [operitRunning, setOperitRunning] = useState(false)
+  const [operitStatus, setOperitStatus] = useState<string | null>(null)
 
   const fetchReviews = useCallback(async () => {
     try {
@@ -1265,6 +1306,37 @@ function TaskDetailModal({
   useEffect(() => {
     fetchReviews()
   }, [fetchReviews])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadOperitDevices = async () => {
+      try {
+        setLoadingOperitDevices(true)
+        const response = await fetch('/api/integrations/operit/devices')
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || 'Failed to load Operit devices')
+        if (cancelled) return
+        const devices = (data.devices || []) as OperitDeviceOption[]
+        setOperitDevices(devices)
+        const metadataDeviceId = task.metadata?.operit?.device_id
+        const matchedByAgent = task.assigned_to
+          ? devices.find((device) => device.agentName === task.assigned_to)
+          : null
+        const nextDeviceId = metadataDeviceId ? String(metadataDeviceId) : matchedByAgent ? String(matchedByAgent.id) : devices[0] ? String(devices[0].id) : ''
+        setSelectedOperitDeviceId((prev) => prev || nextDeviceId)
+        const nextMode = task.metadata?.operit?.mode === 'sync' ? 'sync' : matchedByAgent?.defaultMode === 'sync' ? 'sync' : 'sse'
+        setOperitMode(nextMode)
+      } catch (error: any) {
+        if (!cancelled) setOperitStatus(error?.message || 'Failed to load Operit devices')
+      } finally {
+        if (!cancelled) setLoadingOperitDevices(false)
+      }
+    }
+    loadOperitDevices()
+    return () => {
+      cancelled = true
+    }
+  }, [task.assigned_to, task.metadata])
   
   useSmartPoll(fetchComments, 15000)
 
@@ -1590,6 +1662,91 @@ function TaskDetailModal({
                   ))}
                 </select>
                 {task.assigned_to && <AgentAvatar name={task.assigned_to} size="xs" />}
+              </div>
+
+              <div className="rounded-lg border border-border/30 bg-secondary/20 p-3 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground/70">Operit Executor</div>
+                    <div className="text-sm text-foreground/80">Run this task on a registered Operit device.</div>
+                    {task.status === 'failed' && (
+                      <div className="mt-1 text-xs text-amber-300/90">
+                        Gateway dispatch failed above, but you can still run this task directly on the phone through Operit.
+                      </div>
+                    )}
+                  </div>
+                  <Button variant="secondary" size="sm" onClick={async () => {
+                    try {
+                      setLoadingOperitDevices(true)
+                      const response = await fetch('/api/integrations/operit/devices')
+                      const data = await response.json()
+                      if (!response.ok) throw new Error(data.error || 'Failed to reload Operit devices')
+                      setOperitDevices(data.devices || [])
+                    } catch (error: any) {
+                      setOperitStatus(error?.message || 'Failed to reload Operit devices')
+                    } finally {
+                      setLoadingOperitDevices(false)
+                    }
+                  }}>Reload</Button>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px_auto]">
+                  <select
+                    className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground"
+                    value={selectedOperitDeviceId}
+                    onChange={(e) => setSelectedOperitDeviceId(e.target.value)}
+                    disabled={loadingOperitDevices || operitDevices.length === 0}
+                  >
+                    <option value="">{loadingOperitDevices ? 'Loading Operit devices...' : 'Select Operit device'}</option>
+                    {operitDevices.map((device) => (
+                      <option key={device.id} value={device.id}>{device.name} · {device.baseUrl}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground"
+                    value={operitMode}
+                    onChange={(e) => setOperitMode(e.target.value as 'sync' | 'sse')}
+                  >
+                    <option value="sse">SSE</option>
+                    <option value="sync">Sync</option>
+                  </select>
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="whitespace-nowrap min-w-[132px]"
+                    disabled={!selectedOperitDeviceId || operitRunning || loadingOperitDevices}
+                    title={!selectedOperitDeviceId ? 'Select an Operit device first' : loadingOperitDevices ? 'Loading Operit devices...' : 'Run this task directly on the selected phone'}
+                    onClick={async () => {
+                      if (!selectedOperitDeviceId) return
+                      try {
+                        setOperitRunning(true)
+                        setOperitStatus('Starting Operit run...')
+                        const response = await fetch(`/api/integrations/operit/tasks/${task.id}/run`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ deviceId: Number(selectedOperitDeviceId), mode: operitMode }),
+                        })
+                        const data = await response.json()
+                        if (!response.ok) throw new Error(data.error || 'Operit run failed')
+                        setOperitStatus(`Run completed on ${data.run?.device || 'Operit'}; task moved to review.`)
+                        onUpdate()
+                      } catch (error: any) {
+                        setOperitStatus(error?.message || 'Operit run failed')
+                      } finally {
+                        setOperitRunning(false)
+                      }
+                    }}
+                  >
+                    {operitRunning ? 'Running...' : 'Run on Operit'}
+                  </Button>
+                </div>
+
+                {operitStatus && <div className="text-xs text-muted-foreground">{operitStatus}</div>}
+                {!operitStatus && selectedOperitDeviceId && !loadingOperitDevices && (
+                  <div className="text-xs text-emerald-300/80">
+                    Direct device execution is ready. This does not require the OpenClaw gateway dispatch path.
+                  </div>
+                )}
               </div>
 
               {task.status === 'failed' && task.error_message && (

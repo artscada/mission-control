@@ -4,13 +4,32 @@ import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { PipelineTab } from './pipeline-tab'
+import { summarizeAgentResponse } from '@/lib/agent-response'
+import { useMissionControl } from '@/store'
+import type { Agent as StoreAgent } from '@/store'
 
-interface Agent {
-  id: number
-  name: string
-  role: string
-  status: string
-  session_key?: string
+type Agent = StoreAgent & {
+  source?: string
+}
+
+function readAgentIntegration(agent: Agent): string | undefined {
+  if (!agent.config || typeof agent.config !== 'object' || Array.isArray(agent.config)) return undefined
+  const integration = (agent.config as Record<string, unknown>).integration
+  return typeof integration === 'string' ? integration : undefined
+}
+
+function isOperitHttpAgent(agent: Agent): boolean {
+  return agent.source === 'operit' || readAgentIntegration(agent) === 'operit_http'
+}
+
+function canDirectMessage(agent: Agent): boolean {
+  return Boolean(agent.session_key) || isOperitHttpAgent(agent)
+}
+
+function getAgentTransportHint(agent: Agent, noSessionLabel: string): string {
+  if (isOperitHttpAgent(agent)) return 'Operit HTTP'
+  if (!agent.session_key) return noSessionLabel
+  return ''
 }
 
 interface WorkflowTemplate {
@@ -43,7 +62,7 @@ const emptyForm: TemplateFormData = {
 
 export function OrchestrationBar() {
   const t = useTranslations('orchestration')
-  const [agents, setAgents] = useState<Agent[]>([])
+  const { agents, setAgents } = useMissionControl()
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([])
   const [activeTab, setActiveTab] = useState<'command' | 'templates' | 'pipelines' | 'fleet'>('command')
 
@@ -91,11 +110,21 @@ export function OrchestrationBar() {
       const res = await fetch('/api/agents/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: selectedAgent, content: message, from: 'operator' })
+        body: JSON.stringify({ to: selectedAgent, message, from: 'operator' })
       })
       const data = await res.json()
       if (res.ok) {
-        setCommandResult({ ok: true, text: `Message sent to ${selectedAgent}` })
+        const agentResponse = summarizeAgentResponse(data.response ?? data.responsePreview)
+        const transport = data.transport === 'operit_http' ? ' via Operit HTTP' : ''
+        if (agentResponse?.isError) {
+          setCommandResult({
+            ok: false,
+            text: `Agent ${selectedAgent}${transport} reported an error: ${agentResponse.text}`,
+          })
+        } else {
+          const responsePreview = agentResponse?.text ? `: ${agentResponse.text}` : ''
+          setCommandResult({ ok: true, text: `Message sent to ${selectedAgent}${transport}${responsePreview}` })
+        }
         setMessage('')
       } else {
         setCommandResult({ ok: false, text: data.error || 'Failed to send' })
@@ -271,11 +300,21 @@ export function OrchestrationBar() {
               {agents.length === 0 && (
                 <option value="" disabled>{t('noAgentsRegistered')}</option>
               )}
-              {agents.map(a => (
-                <option key={a.name} value={a.name} disabled={!a.session_key} title={!a.session_key ? 'Agent has no active session' : undefined}>
-                  {a.name} ({a.status}){!a.session_key ? ` — ${t('noSessionSuffix')}` : ''}
-                </option>
-              ))}
+              {agents.map(a => {
+                const selectable = canDirectMessage(a)
+                const transportHint = getAgentTransportHint(a, t('noSessionSuffix'))
+
+                return (
+                  <option
+                    key={a.name}
+                    value={a.name}
+                    disabled={!selectable}
+                    title={!selectable ? 'Agent has no active session or Operit HTTP link' : undefined}
+                  >
+                    {a.name} ({a.status}){transportHint ? ` — ${transportHint}` : ''}
+                  </option>
+                )
+              })}
             </select>
             <input
               value={message}

@@ -1,12 +1,20 @@
-export function buildMissionControlCsp(input: { nonce: string; googleEnabled: boolean }): string {
-  const { nonce, googleEnabled } = input
+export function buildMissionControlCsp(input: { nonce: string; googleEnabled: boolean; allowUnsafeInlineScripts?: boolean }): string {
+  const { nonce, googleEnabled, allowUnsafeInlineScripts = false } = input
+  const scriptSrc = [
+    `script-src 'self'`,
+    allowUnsafeInlineScripts ? `'unsafe-inline'` : '',
+    nonce ? `'nonce-${nonce}'` : '',
+    `'strict-dynamic'`,
+    'blob:',
+    googleEnabled ? 'https://accounts.google.com' : '',
+  ].filter(Boolean).join(' ')
 
   return [
     `default-src 'self'`,
     `base-uri 'self'`,
     `object-src 'none'`,
     `frame-ancestors 'none'`,
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' blob:${googleEnabled ? ' https://accounts.google.com' : ''}`,
+    scriptSrc,
     `style-src 'self' 'unsafe-inline'`,
     `style-src-elem 'self' 'unsafe-inline'`,
     `style-src-attr 'unsafe-inline'`,
@@ -24,7 +32,11 @@ export function buildNonceRequestHeaders(input: {
   googleEnabled: boolean
 }): Headers {
   const requestHeaders = new Headers(input.headers)
-  const csp = buildMissionControlCsp({ nonce: input.nonce, googleEnabled: input.googleEnabled })
+  const csp = buildMissionControlCsp({
+    nonce: input.nonce,
+    googleEnabled: input.googleEnabled,
+    allowUnsafeInlineScripts: process.env.NODE_ENV !== 'production',
+  })
 
   requestHeaders.set('x-nonce', input.nonce)
   requestHeaders.set('Content-Security-Policy', csp)

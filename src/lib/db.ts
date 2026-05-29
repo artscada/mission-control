@@ -274,6 +274,44 @@ export interface Notification {
   created_at: number;
 }
 
+export interface OperitDevice {
+  id: number
+  name: string
+  base_url: string
+  bearer_token: string
+  enabled: number
+  agent_name?: string | null
+  default_mode?: 'sync' | 'sse' | 'async_callback' | null
+  default_show_floating?: number
+  default_return_tool_status?: number
+  default_initial_mode?: string | null
+  version_name?: string | null
+  last_health_status?: string | null
+  last_health_at?: number | null
+  created_at: number
+  updated_at: number
+  workspace_id: number
+}
+
+export interface OperitRun {
+  id: number
+  task_id: number
+  device_id?: number | null
+  device_name: string
+  agent_name?: string | null
+  request_id?: string | null
+  chat_id?: string | null
+  mode: 'sync' | 'sse' | 'async_callback'
+  status: string
+  prompt_text?: string | null
+  response_text?: string | null
+  raw_stream?: string | null
+  error_message?: string | null
+  started_at: number
+  finished_at?: number | null
+  workspace_id: number
+}
+
 export interface Tenant {
   id: number
   slug: string

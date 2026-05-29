@@ -463,6 +463,7 @@
     "markAllRead": "Mark All Read",
     "recipientLabel": "Recipient",
     "recipientPlaceholder": "Agent name (e.g., my-agent)",
+    "allRecipients": "All recipients",
     "noNotifications": "No notifications",
     "markRead": "Mark read"
   },
@@ -758,6 +759,7 @@
     "spawn": "Spawn",
     "noActiveSpawnRequests": "No active spawn requests",
     "dismissError": "Dismiss error",
+    "filteredEmptyState": "No tasks found for project {project}. The board is empty because a project filter is active.",
     "taskBoard": "Task Board",
     "taskBoardAriaLabel": "Task Board",
     "columnAriaLabel": "{title} column, {count} tasks",

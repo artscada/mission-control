@@ -8,6 +8,24 @@ import { logger } from '@/lib/logger'
 import { scanForInjection } from '@/lib/injection-guard'
 import { scanForSecrets } from '@/lib/secret-scanner'
 import { logSecurityEvent } from '@/lib/security-events'
+import { randomUUID } from 'node:crypto'
+import { OperitClient } from '@/lib/integrations/operit/client'
+import { ensureOperitAgentRecord } from '@/lib/integrations/operit/agent-link'
+import { mapOperitDeviceRow } from '@/lib/integrations/operit/utils'
+
+function parseJsonObject(raw: string | null | undefined): Record<string, any> {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function preview(text: string, max = 240): string {
+  return text.length > max ? `${text.slice(0, max)}...` : text
+}
 
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'operator')
@@ -48,6 +66,77 @@ export async function POST(request: NextRequest) {
     if (!agent) {
       return NextResponse.json({ error: 'Recipient agent not found' }, { status: 404 })
     }
+
+    const agentConfig = parseJsonObject(agent.config)
+    const operitInfo = agentConfig.operit && typeof agentConfig.operit === 'object' ? agentConfig.operit : null
+    const isOperitAgent = agent.source === 'operit' || agentConfig.integration === 'operit_http'
+
+    if (isOperitAgent) {
+      const deviceId = Number.parseInt(String(operitInfo?.deviceId || ''), 10)
+      if (!Number.isFinite(deviceId)) {
+        return NextResponse.json({ error: 'Operit agent is missing a linked device id' }, { status: 400 })
+      }
+
+      const deviceRow = db.prepare('SELECT * FROM operit_devices WHERE id = ? AND workspace_id = ? AND enabled = 1').get(deviceId, workspaceId) as any
+      if (!deviceRow) {
+        return NextResponse.json({ error: 'Linked Operit device not found or disabled' }, { status: 404 })
+      }
+
+      const device = mapOperitDeviceRow(deviceRow)
+      const client = new OperitClient(device)
+      const now = Math.floor(Date.now() / 1000)
+
+      const result = await client.runSync({
+        request_id: randomUUID(),
+        message: `Сообщение из Mission Control от ${from}.\n\n${message}`,
+        group: 'mission-control',
+        create_new_chat: true,
+        show_floating: device.defaultShowFloating,
+        return_tool_status: device.defaultReturnToolStatus,
+        initial_mode: device.defaultInitialMode || undefined,
+      })
+
+      ensureOperitAgentRecord(db, workspaceId, {
+        ...device,
+        lastHealthStatus: device.lastHealthStatus || 'ok',
+        lastHealthAt: now,
+        versionName: device.versionName || null,
+      }, {
+        status: 'idle',
+        lastActivity: `Direct Operit message completed: ${preview(message, 80)}`,
+        now,
+      })
+
+      db_helpers.createNotification(
+        to,
+        'message',
+        'Operit Direct Message',
+        `${from}: ${preview(result.aiResponse, 200)}`,
+        'agent',
+        agent.id,
+        workspaceId
+      )
+
+      db_helpers.logActivity(
+        'agent_message',
+        'agent',
+        agent.id,
+        from,
+        `Sent direct message to ${to} via Operit`,
+        { to, transport: 'operit_http', requestId: result.requestId, chatId: result.chatId, response_preview: preview(result.aiResponse) },
+        workspaceId
+      )
+
+      return NextResponse.json({
+        success: true,
+        transport: 'operit_http',
+        requestId: result.requestId,
+        chatId: result.chatId,
+        response: result.aiResponse,
+        responsePreview: preview(result.aiResponse),
+      })
+    }
+
     if (!agent.session_key) {
       return NextResponse.json(
         { error: 'Recipient agent has no session key configured' },

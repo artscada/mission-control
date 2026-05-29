@@ -12,6 +12,9 @@ import { syncSkillsFromDisk } from './skill-sync'
 import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks, reconcileDeferredTaskCompletions } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
+import { OperitClient } from './integrations/operit/client'
+import { ensureOperitAgentRecord } from './integrations/operit/agent-link'
+import { mapOperitDeviceRow } from './integrations/operit/utils'
 
 const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
 
@@ -271,6 +274,99 @@ async function syncAgentLiveStatuses(): Promise<number> {
   return refreshed
 }
 
+async function syncOperitDeviceHealth(): Promise<{ ok: boolean; message: string }> {
+  try {
+    const db = getDatabase()
+    const now = Math.floor(Date.now() / 1000)
+    const devices = db.prepare(`
+      SELECT * FROM operit_devices
+      WHERE enabled = 1
+    `).all() as any[]
+
+    if (devices.length === 0) {
+      return { ok: true, message: 'No enabled Operit devices' }
+    }
+
+    const updateDevice = db.prepare(`
+      UPDATE operit_devices
+      SET version_name = ?, last_health_status = ?, last_health_at = ?, updated_at = ?
+      WHERE id = ? AND workspace_id = ?
+    `)
+
+    let healthy = 0
+    let failed = 0
+
+    for (const row of devices) {
+      const device = mapOperitDeviceRow(row)
+      const workspaceId = Number(row.workspace_id) || 1
+      const existingAgent = db.prepare(`
+        SELECT status FROM agents
+        WHERE workspace_id = ?
+          AND source = 'operit'
+          AND json_extract(config, '$.operit.deviceId') = ?
+        ORDER BY id ASC
+        LIMIT 1
+      `).get(workspaceId, device.id) as { status?: string } | undefined
+
+      try {
+        const health = await new OperitClient(device).health()
+        const status = existingAgent?.status === 'busy' ? 'busy' : 'idle'
+
+        updateDevice.run(
+          health.version_name || null,
+          health.status || 'ok',
+          now,
+          now,
+          device.id,
+          workspaceId,
+        )
+
+        ensureOperitAgentRecord(db, workspaceId, {
+          ...device,
+          versionName: health.version_name || null,
+          lastHealthStatus: health.status || 'ok',
+          lastHealthAt: now,
+        }, {
+          status,
+          lastActivity: `Operit health OK (${health.version_name || 'unknown version'})`,
+          now,
+        })
+
+        healthy++
+      } catch (error: any) {
+        const message = error?.message || 'Operit health check failed'
+        updateDevice.run(
+          device.versionName || null,
+          `error:${message}`,
+          now,
+          now,
+          device.id,
+          workspaceId,
+        )
+
+        ensureOperitAgentRecord(db, workspaceId, {
+          ...device,
+          lastHealthStatus: `error:${message}`,
+          lastHealthAt: now,
+        }, {
+          status: 'error',
+          lastActivity: `Operit health failed: ${message}`,
+          now,
+        })
+
+        failed++
+      }
+    }
+
+    return {
+      ok: failed === 0,
+      message: `Operit health sync: ${healthy} healthy, ${failed} failed`,
+    }
+  } catch (err: any) {
+    return { ok: false, message: `Operit health sync failed: ${err.message}` }
+  }
+}
+
 const DAILY_MS = 24 * 60 * 60 * 1000
 const FIVE_MINUTES_MS = 5 * 60 * 1000
 const TICK_MS = 60 * 1000 // Check every minute
@@ -313,6 +409,15 @@ export function initScheduler() {
     intervalMs: FIVE_MINUTES_MS,
     lastRun: null,
     nextRun: now + FIVE_MINUTES_MS,
+    enabled: true,
+    running: false,
+  })
+
+  tasks.set('operit_device_health', {
+    name: 'Operit Device Health Sync',
+    intervalMs: FIVE_MINUTES_MS,
+    lastRun: null,
+    nextRun: now + 30_000,
     enabled: true,
     running: false,
   })
@@ -429,12 +534,13 @@ async function tick() {
       : id === 'skill_sync' ? 'general.skill_sync'
       : id === 'local_agent_sync' ? 'general.local_agent_sync'
       : id === 'gateway_agent_sync' ? 'general.gateway_agent_sync'
+      : id === 'operit_device_health' ? 'general.operit_device_health'
       : id === 'task_dispatch' ? 'general.task_dispatch'
       : id === 'aegis_review' ? 'general.aegis_review'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'operit_device_health' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
@@ -445,6 +551,7 @@ async function tick() {
         : id === 'claude_session_scan' ? await syncClaudeSessions()
         : id === 'skill_sync' ? await syncSkillsFromDisk()
         : id === 'local_agent_sync' ? await syncLocalAgents()
+        : id === 'operit_device_health' ? await syncOperitDeviceHealth()
         : id === 'gateway_agent_sync' ? await syncAgentsFromConfig('scheduled').then(async r => {
             const refreshed = await syncAgentLiveStatuses()
             return { ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total | Live status: ${refreshed} refreshed` }
@@ -490,12 +597,13 @@ export function getSchedulerStatus() {
       : id === 'skill_sync' ? 'general.skill_sync'
       : id === 'local_agent_sync' ? 'general.local_agent_sync'
       : id === 'gateway_agent_sync' ? 'general.gateway_agent_sync'
+      : id === 'operit_device_health' ? 'general.operit_device_health'
       : id === 'task_dispatch' ? 'general.task_dispatch'
       : id === 'aegis_review' ? 'general.aegis_review'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'operit_device_health' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
       id,
       name: task.name,
@@ -519,6 +627,7 @@ export async function triggerTask(taskId: string): Promise<{ ok: boolean; messag
   if (taskId === 'claude_session_scan') return syncClaudeSessions()
   if (taskId === 'skill_sync') return syncSkillsFromDisk()
   if (taskId === 'local_agent_sync') return syncLocalAgents()
+  if (taskId === 'operit_device_health') return syncOperitDeviceHealth()
   if (taskId === 'gateway_agent_sync') return syncAgentsFromConfig('manual').then(r => ({ ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total` }))
   if (taskId === 'task_dispatch') return autoRouteInboxTasks().then(async (r) => { const c = await reconcileDeferredTaskCompletions(); const d = await dispatchAssignedTasks(); return { ok: r.ok && c.ok && d.ok, message: [c.message, r.message, d.message].filter(m => m && !m.includes('No ') && !m.includes('none completed')).join(' | ') || 'No tasks' } })
   if (taskId === 'aegis_review') return runAegisReviews()
