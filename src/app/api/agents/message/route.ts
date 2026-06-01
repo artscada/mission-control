@@ -8,10 +8,9 @@ import { logger } from '@/lib/logger'
 import { scanForInjection } from '@/lib/injection-guard'
 import { scanForSecrets } from '@/lib/secret-scanner'
 import { logSecurityEvent } from '@/lib/security-events'
-import { randomUUID } from 'node:crypto'
-import { OperitClient } from '@/lib/integrations/operit/client'
 import { ensureOperitAgentRecord } from '@/lib/integrations/operit/agent-link'
 import { mapOperitDeviceRow } from '@/lib/integrations/operit/utils'
+import { buildMissionControlMessagePrompt, runPromptOnLinkedDevice } from '@/lib/integrations/afd-mcp/bridge'
 
 function parseJsonObject(raw: string | null | undefined): Record<string, any> {
   if (!raw) return {}
@@ -83,18 +82,12 @@ export async function POST(request: NextRequest) {
       }
 
       const device = mapOperitDeviceRow(deviceRow)
-      const client = new OperitClient(device)
       const now = Math.floor(Date.now() / 1000)
 
-      const result = await client.runSync({
-        request_id: randomUUID(),
-        message: `Сообщение из Mission Control от ${from}.\n\n${message}`,
-        group: 'mission-control',
-        create_new_chat: true,
-        show_floating: device.defaultShowFloating,
-        return_tool_status: device.defaultReturnToolStatus,
-        initial_mode: device.defaultInitialMode || undefined,
-      })
+      const result = await runPromptOnLinkedDevice(device, buildMissionControlMessagePrompt(from, message), { timeoutSec: 180 })
+      if (result.run.status !== 'completed') {
+        throw new Error(result.run.errorText || `AFD-MCP run finished with status ${result.run.status}`)
+      }
 
       ensureOperitAgentRecord(db, workspaceId, {
         ...device,
@@ -111,7 +104,7 @@ export async function POST(request: NextRequest) {
         to,
         'message',
         'Operit Direct Message',
-        `${from}: ${preview(result.aiResponse, 200)}`,
+        `${from}: ${preview(result.run.responseText || '', 200)}`,
         'agent',
         agent.id,
         workspaceId
@@ -122,18 +115,18 @@ export async function POST(request: NextRequest) {
         'agent',
         agent.id,
         from,
-        `Sent direct message to ${to} via Operit`,
-        { to, transport: 'operit_http', requestId: result.requestId, chatId: result.chatId, response_preview: preview(result.aiResponse) },
+        `Sent direct message to ${to} via AFD-MCP`,
+        { to, transport: 'operit_http', via: 'afd_mcp', requestId: result.run.remoteRunId, chatId: null, response_preview: preview(result.run.responseText || '') },
         workspaceId
       )
 
       return NextResponse.json({
         success: true,
         transport: 'operit_http',
-        requestId: result.requestId,
-        chatId: result.chatId,
-        response: result.aiResponse,
-        responsePreview: preview(result.aiResponse),
+        requestId: result.run.remoteRunId,
+        chatId: null,
+        response: result.run.responseText,
+        responsePreview: preview(result.run.responseText || ''),
       })
     }
 

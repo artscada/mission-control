@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
-import { OperitClient } from '@/lib/integrations/operit/client'
 import { ensureOperitAgentRecord } from '@/lib/integrations/operit/agent-link'
 import { mapOperitDeviceRow } from '@/lib/integrations/operit/utils'
+import { healthCheckLinkedDevice } from '@/lib/integrations/afd-mcp/bridge'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,27 +22,36 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const row = db.prepare('SELECT * FROM operit_devices WHERE id = ? AND workspace_id = ?').get(deviceId, workspaceId) as any
     if (!row) return NextResponse.json({ error: 'Operit device not found' }, { status: 404 })
     const device = mapOperitDeviceRow(row)
-    const client = new OperitClient(device)
 
     try {
-      const health = await client.health()
+      const { fleetDevice, health } = await healthCheckLinkedDevice(device)
+      if (!health.healthy) {
+        throw new Error(health.error || `AFD-MCP reports ${fleetDevice.id} as unhealthy`)
+      }
+
+      const lastHealthStatus = health.busy ? 'busy' : 'ok'
       db.prepare(`
         UPDATE operit_devices
         SET version_name = ?, last_health_status = ?, last_health_at = unixepoch(), updated_at = unixepoch()
         WHERE id = ? AND workspace_id = ?
-      `).run(health.version_name || null, health.status || 'ok', deviceId, workspaceId)
+      `).run(device.versionName || null, lastHealthStatus, deviceId, workspaceId)
 
       ensureOperitAgentRecord(db, workspaceId, {
         ...device,
-        versionName: health.version_name || null,
-        lastHealthStatus: health.status || 'ok',
+        versionName: device.versionName || null,
+        lastHealthStatus,
         lastHealthAt: Math.floor(Date.now() / 1000),
       }, {
-        status: 'idle',
-        lastActivity: `Operit health OK (${health.version_name || 'unknown version'})`,
+        status: health.busy ? 'busy' : 'idle',
+        lastActivity: `AFD-MCP health OK (${fleetDevice.id})`,
       })
 
-      db_helpers.logActivity('operit_device_health_ok', 'operit_device', deviceId, auth.user.username, `Operit health check succeeded for ${device.name}`, health, workspaceId)
+      db_helpers.logActivity('operit_device_health_ok', 'operit_device', deviceId, auth.user.username, `AFD-MCP health check succeeded for ${device.name}`, {
+        fleetDeviceId: fleetDevice.id,
+        healthy: health.healthy,
+        busy: health.busy,
+        version: health.version || null,
+      }, workspaceId)
       return NextResponse.json({ ok: true, health })
     } catch (error: any) {
       db.prepare(`

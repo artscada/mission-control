@@ -139,8 +139,9 @@ docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 
 5) Orchestrate Android phone agents over LAN with Operit HTTP
 - Enable the Operit HTTP service on each device
+- Run `android-fleet-broadcast-mcp` as the fleet dispatcher between Mission Control and the phones
 - Sync devices into Mission Control as `operit-*` agents
-- Dispatch direct commands, scheduled tasks, and operator messages from one dashboard
+- Dispatch direct commands, scheduled tasks, and operator messages from one dashboard through `AFD-MCP -> Operit`
 - Use lightweight live previews on the grid and open full live views only for the active phone
 
 ---
@@ -188,6 +189,26 @@ For the full walkthrough, see the **[Quickstart Guide](docs/quickstart.md)**.
 | [Security Hardening](docs/SECURITY-HARDENING.md) | Docker hardening, CSP, network isolation |
 | [Release Process](RELEASE.md) | SemVer policy, branch strategy, tag/release checklist |
 | [API Reference](openapi.json) | OpenAPI 3.1 spec — 101 REST endpoints with Scalar UI at `/api-docs` |
+
+### AFD-MCP bridge
+
+Mission Control can delegate Operit health checks and task execution to a standalone `android-fleet-broadcast-mcp` instance.
+
+Recommended Windows setup:
+
+```bash
+AFD_MCP_COMMAND=C:\AFD-MCP\start-mcp-server.cmd
+AFD_MCP_ARGS_JSON=[]
+AFD_MCP_CWD=C:\AFD-MCP
+```
+
+This gives you a clean runtime chain:
+
+```text
+Mission Control -> android-fleet-broadcast-mcp -> Operit HTTP API on phones
+```
+
+Mission Control still keeps its own dashboard records for Operit devices and runs, but the live execution path goes through the external fleet dispatcher.
 
 ### Gateway Optional Mode
 

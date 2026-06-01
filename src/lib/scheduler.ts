@@ -12,7 +12,7 @@ import { syncSkillsFromDisk } from './skill-sync'
 import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks, reconcileDeferredTaskCompletions } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
-import { OperitClient } from './integrations/operit/client'
+import { healthCheckLinkedDevice } from './integrations/afd-mcp/bridge'
 import { ensureOperitAgentRecord } from './integrations/operit/agent-link'
 import { mapOperitDeviceRow } from './integrations/operit/utils'
 
@@ -309,12 +309,17 @@ async function syncOperitDeviceHealth(): Promise<{ ok: boolean; message: string 
       `).get(workspaceId, device.id) as { status?: string } | undefined
 
       try {
-        const health = await new OperitClient(device).health()
+        const { fleetDevice, health } = await healthCheckLinkedDevice(device)
+        const lastHealthStatus = health.busy ? 'busy' : 'ok'
+        if (!health.healthy) {
+          throw new Error(health.error || `AFD-MCP reports ${fleetDevice.id} as unhealthy`)
+        }
+
         const status = existingAgent?.status === 'busy' ? 'busy' : 'idle'
 
         updateDevice.run(
-          health.version_name || null,
-          health.status || 'ok',
+          device.versionName || null,
+          lastHealthStatus,
           now,
           now,
           device.id,
@@ -323,12 +328,12 @@ async function syncOperitDeviceHealth(): Promise<{ ok: boolean; message: string 
 
         ensureOperitAgentRecord(db, workspaceId, {
           ...device,
-          versionName: health.version_name || null,
-          lastHealthStatus: health.status || 'ok',
+          versionName: device.versionName || null,
+          lastHealthStatus,
           lastHealthAt: now,
         }, {
           status,
-          lastActivity: `Operit health OK (${health.version_name || 'unknown version'})`,
+          lastActivity: `AFD-MCP health OK (${fleetDevice.id})`,
           now,
         })
 

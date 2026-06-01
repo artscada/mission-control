@@ -161,7 +161,7 @@ export function OperitPanel() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold text-foreground">Operit</h2>
-          <p className="text-sm text-muted-foreground">Register LAN-reachable Operit devices and launch Mission Control tasks on them.</p>
+          <p className="text-sm text-muted-foreground">Register LAN-reachable Operit devices and launch Mission Control tasks on them through AFD-MCP.</p>
         </div>
         <Button variant="secondary" size="sm" onClick={fetchData}>Refresh</Button>
       </div>

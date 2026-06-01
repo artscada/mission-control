@@ -8,9 +8,8 @@ import { config } from './config'
 import { getAllGatewaySessions } from './sessions'
 import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage } from './transcript-parser'
 import { syncTaskOutbound } from './github-sync-engine'
-import { executeOperitTask } from './integrations/operit/runner'
+import { healthCheckLinkedDevice, runTaskOnLinkedDevice } from './integrations/afd-mcp/bridge'
 import { ensureOperitAgentRecord, resolveOperitLinkedAgentName } from './integrations/operit/agent-link'
-import { OperitClient } from './integrations/operit/client'
 import { mapOperitDeviceRow, parseTaskMetadata } from './integrations/operit/utils'
 
 const AGENT_DISPATCH_ACCEPT_TIMEOUT_MS = 60_000
@@ -1340,24 +1339,27 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
         const device = mapOperitDeviceRow(deviceRow)
         const linkedAgentName = resolveOperitLinkedAgentName(device)
-        const health = await new OperitClient(device).health()
         const startedAt = Math.floor(Date.now() / 1000)
-        const mode = device.defaultMode === 'sync' ? 'sync' : 'sse'
+        const mode = `afd_mcp:${device.defaultMode === 'sync' ? 'sync' : 'sse'}`
+        const { fleetDevice, health } = await healthCheckLinkedDevice(device)
+        if (!health.healthy) {
+          throw new Error(health.error || `AFD-MCP reports ${fleetDevice.id} as unhealthy`)
+        }
 
         db.prepare(`
           UPDATE operit_devices
           SET version_name = ?, last_health_status = ?, last_health_at = ?, updated_at = ?
           WHERE id = ? AND workspace_id = ?
-        `).run(health.version_name || null, health.status || 'ok', startedAt, startedAt, device.id, task.workspace_id)
+        `).run(device.versionName || null, health.busy ? 'busy' : 'ok', startedAt, startedAt, device.id, task.workspace_id)
 
         ensureOperitAgentRecord(db, task.workspace_id, {
           ...device,
-          lastHealthStatus: health.status || 'ok',
+          lastHealthStatus: health.busy ? 'busy' : 'ok',
           lastHealthAt: startedAt,
-          versionName: health.version_name || null,
+          versionName: device.versionName || null,
         }, {
           status: 'busy',
-          lastActivity: `Operit task starting: ${task.title}`,
+          lastActivity: `AFD-MCP task starting: ${task.title}`,
           now: startedAt,
         })
 
@@ -1375,6 +1377,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             device_id: device.id,
             device_name: device.name,
             mode,
+            transport: 'afd_mcp',
             last_run_id: runId,
             group: 'mission-control',
           },
@@ -1394,18 +1397,20 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           'task',
           task.id,
           'scheduler',
-          `Started Operit run on ${device.name} for task ${task.title}`,
-          { runId, deviceId: device.id, mode },
+          `Started AFD-MCP run on ${device.name} for task ${task.title}`,
+          { runId, deviceId: device.id, mode, fleetDeviceId: fleetDevice.id },
           task.workspace_id,
         )
 
         try {
-          const operitResult = await executeOperitTask({
-            task: { title: task.title, description: task.description || null },
+          const operitResult = await runTaskOnLinkedDevice(
+            { title: task.title, description: task.description || null },
             device,
-            mode,
-            group: 'mission-control',
-          })
+            { timeoutSec: 180 },
+          )
+          if (operitResult.run.status !== 'completed') {
+            throw new Error(operitResult.run.errorText || `AFD-MCP run finished with status ${operitResult.run.status}`)
+          }
 
           const finishedAt = Math.floor(Date.now() / 1000)
           db.prepare(`
@@ -1413,11 +1418,11 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             SET request_id = ?, chat_id = ?, status = 'completed', prompt_text = ?, response_text = ?, raw_stream = ?, finished_at = ?
             WHERE id = ? AND workspace_id = ?
           `).run(
-            operitResult.requestId,
-            operitResult.chatId || null,
+            operitResult.run.remoteRunId,
+            null,
             operitResult.prompt,
-            operitResult.aiResponse,
-            operitResult.rawStream || null,
+            operitResult.run.responseText,
+            null,
             finishedAt,
             runId,
             task.workspace_id,
@@ -1427,8 +1432,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             ...nextMetadata,
             operit: {
               ...(nextMetadata.operit || {}),
-              request_id: operitResult.requestId,
-              chat_id: operitResult.chatId,
+              request_id: operitResult.run.remoteRunId,
+              chat_id: null,
               last_run_id: runId,
               last_status: 'completed',
             },
@@ -1438,12 +1443,12 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             UPDATE tasks
             SET status = ?, outcome = ?, resolution = ?, error_message = NULL, metadata = ?, updated_at = ?, dispatch_attempts = 0
             WHERE id = ? AND workspace_id = ?
-          `).run('review', 'success', operitResult.aiResponse, JSON.stringify(successMetadata), finishedAt, task.id, task.workspace_id)
+          `).run('review', 'success', operitResult.run.responseText, JSON.stringify(successMetadata), finishedAt, task.id, task.workspace_id)
 
           db.prepare(`
             INSERT INTO comments (task_id, author, content, created_at, workspace_id)
             VALUES (?, ?, ?, ?, ?)
-          `).run(task.id, linkedAgentName, operitResult.aiResponse, finishedAt, task.workspace_id)
+          `).run(task.id, linkedAgentName, operitResult.run.responseText, finishedAt, task.workspace_id)
 
           eventBus.broadcast('task.status_changed', {
             id: task.id,
@@ -1463,19 +1468,19 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             'task',
             task.id,
             'scheduler',
-            `Completed Operit run on ${device.name} for task ${task.title}`,
-            { runId, deviceId: device.id, requestId: operitResult.requestId, chatId: operitResult.chatId, preview: preview(operitResult.aiResponse) },
+            `Completed AFD-MCP run on ${device.name} for task ${task.title}`,
+            { runId, deviceId: device.id, requestId: operitResult.run.remoteRunId, chatId: null, fleetJobId: operitResult.summary.jobId, preview: preview(operitResult.run.responseText || '') },
             task.workspace_id,
           )
 
           ensureOperitAgentRecord(db, task.workspace_id, {
             ...device,
-            lastHealthStatus: health.status || 'ok',
+            lastHealthStatus: health.busy ? 'busy' : 'ok',
             lastHealthAt: finishedAt,
-            versionName: health.version_name || null,
+            versionName: device.versionName || null,
           }, {
             status: 'idle',
-            lastActivity: `Operit task completed: ${task.title}`,
+            lastActivity: `AFD-MCP task completed: ${task.title}`,
             now: finishedAt,
           })
 
@@ -1513,7 +1518,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             ...device,
             lastHealthStatus: `error:${failureMessage.substring(0, 120)}`,
             lastHealthAt: failureTime,
-            versionName: health.version_name || null,
+            versionName: device.versionName || null,
           }, {
             status: 'error',
             lastActivity: `Operit task failed: ${task.title}`,

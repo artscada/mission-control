@@ -3,11 +3,10 @@ import { getDatabase, db_helpers } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
-import { executeOperitTask } from '@/lib/integrations/operit/runner'
 import { ensureOperitAgentRecord, resolveOperitLinkedAgentName } from '@/lib/integrations/operit/agent-link'
-import { OperitClient } from '@/lib/integrations/operit/client'
 import { mapOperitDeviceRow, parseTaskMetadata } from '@/lib/integrations/operit/utils'
 import { eventBus } from '@/lib/event-bus'
+import { healthCheckLinkedDevice, runTaskOnLinkedDevice } from '@/lib/integrations/afd-mcp/bridge'
 
 export const dynamic = 'force-dynamic'
 
@@ -41,25 +40,27 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!deviceRow) return NextResponse.json({ error: 'Operit device not found or disabled' }, { status: 404 })
     const device = mapOperitDeviceRow(deviceRow)
     const linkedAgentName = resolveOperitLinkedAgentName(device)
-    const mode = body?.mode === 'sync' ? 'sync' : body?.mode === 'async_callback' ? 'async_callback' : (device.defaultMode || 'sse')
-    if (mode === 'async_callback') {
-      return NextResponse.json({ error: 'async_callback is reserved for a later phase of the Operit connector' }, { status: 400 })
+    const requestedMode = body?.mode === 'sync' ? 'sync' : body?.mode === 'async_callback' ? 'async_callback' : (device.defaultMode || 'sse')
+    const mode = `afd_mcp:${requestedMode}`
+
+    const { fleetDevice, health } = await healthCheckLinkedDevice(device)
+    if (!health.healthy) {
+      throw new Error(health.error || `AFD-MCP reports ${fleetDevice.id} as unhealthy`)
     }
 
-    const health = await new OperitClient(device).health()
     db.prepare(`
       UPDATE operit_devices
       SET version_name = ?, last_health_status = ?, last_health_at = ?, updated_at = ?
       WHERE id = ? AND workspace_id = ?
-    `).run(health.version_name || null, health.status || 'ok', now, now, deviceId, workspaceId)
+    `).run(device.versionName || null, health.busy ? 'busy' : 'ok', now, now, deviceId, workspaceId)
     ensureOperitAgentRecord(db, workspaceId, {
       ...device,
-      lastHealthStatus: health.status || 'ok',
+      lastHealthStatus: health.busy ? 'busy' : 'ok',
       lastHealthAt: now,
-      versionName: health.version_name || null,
+      versionName: device.versionName || null,
     }, {
       status: 'busy',
-      lastActivity: `Operit task starting: ${task.title}`,
+      lastActivity: `AFD-MCP task starting: ${task.title}`,
       now,
     })
 
@@ -78,8 +79,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         device_id: device.id,
         device_name: device.name,
         mode,
+        transport: 'afd_mcp',
         last_run_id: runId,
-        group: typeof body?.group === 'string' && body.group.trim() ? body.group.trim() : 'mission-control',
+        group: 'mission-control',
       },
     }
 
@@ -98,22 +100,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       'task',
       taskId,
       auth.user.username,
-      `Started Operit run on ${device.name} for task ${task.title}`,
-      { runId, deviceId, mode },
+      `Started AFD-MCP run on ${device.name} for task ${task.title}`,
+      { runId, deviceId, mode, fleetDeviceId: fleetDevice.id },
       workspaceId,
     )
     eventBus.broadcast('task.updated', { id: taskId, status: 'in_progress', workspace_id: workspaceId })
 
-    const result = await executeOperitTask({
-      task: { title: task.title, description: task.description || null },
+    const result = await runTaskOnLinkedDevice(
+      { title: task.title, description: task.description || null },
       device,
-      mode,
-      showFloating: body?.showFloating,
-      returnToolStatus: body?.returnToolStatus,
-      createNewChat: body?.createNewChat,
-      group: typeof body?.group === 'string' && body.group.trim() ? body.group.trim() : 'mission-control',
-      initialMode: typeof body?.initialMode === 'string' && body.initialMode.trim() ? body.initialMode.trim() : null,
-    })
+      { timeoutSec: Number.isFinite(Number(body?.timeoutSec)) ? Number(body.timeoutSec) : 180 },
+    )
+
+    if (result.run.status !== 'completed') {
+      throw new Error(result.run.errorText || `AFD-MCP run finished with status ${result.run.status}`)
+    }
 
     const finishedAt = Math.floor(Date.now() / 1000)
     db.prepare(`
@@ -121,11 +122,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       SET request_id = ?, chat_id = ?, status = 'completed', prompt_text = ?, response_text = ?, raw_stream = ?, finished_at = ?
       WHERE id = ? AND workspace_id = ?
     `).run(
-      result.requestId,
-      result.chatId || null,
+      result.run.remoteRunId,
+      null,
       result.prompt,
-      result.aiResponse,
-      result.rawStream || null,
+      result.run.responseText,
+      null,
       finishedAt,
       runId,
       workspaceId,
@@ -135,8 +136,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...nextMetadata,
       operit: {
         ...(nextMetadata.operit || {}),
-        request_id: result.requestId,
-        chat_id: result.chatId,
+        request_id: result.run.remoteRunId,
+        chat_id: null,
         last_run_id: runId,
         last_status: 'completed',
       },
@@ -146,25 +147,25 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       UPDATE tasks
       SET status = 'review', resolution = ?, error_message = NULL, metadata = ?, updated_at = ?
       WHERE id = ? AND workspace_id = ?
-    `).run(result.aiResponse, JSON.stringify(successMetadata), finishedAt, taskId, workspaceId)
+    `).run(result.run.responseText, JSON.stringify(successMetadata), finishedAt, taskId, workspaceId)
 
     db_helpers.logActivity(
       'operit_run_completed',
       'task',
       taskId,
       auth.user.username,
-      `Completed Operit run on ${device.name} for task ${task.title}`,
-      { runId, deviceId, requestId: result.requestId, chatId: result.chatId, preview: preview(result.aiResponse) },
+      `Completed AFD-MCP run on ${device.name} for task ${task.title}`,
+      { runId, deviceId, requestId: result.run.remoteRunId, chatId: null, fleetJobId: result.summary.jobId, preview: preview(result.run.responseText || '') },
       workspaceId,
     )
     ensureOperitAgentRecord(db, workspaceId, {
       ...device,
-      lastHealthStatus: health.status || 'ok',
+      lastHealthStatus: health.busy ? 'busy' : 'ok',
       lastHealthAt: finishedAt,
-      versionName: health.version_name || null,
+      versionName: device.versionName || null,
     }, {
       status: 'idle',
-      lastActivity: `Operit task completed: ${task.title}`,
+      lastActivity: `AFD-MCP task completed: ${task.title}`,
       now: finishedAt,
     })
     eventBus.broadcast('task.updated', { id: taskId, status: 'review', workspace_id: workspaceId })
@@ -175,9 +176,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         id: runId,
         device: device.name,
         mode,
-        requestId: result.requestId,
-        chatId: result.chatId,
-        preview: preview(result.aiResponse),
+        requestId: result.run.remoteRunId,
+        chatId: null,
+        preview: preview(result.run.responseText || ''),
       },
       task: {
         id: taskId,

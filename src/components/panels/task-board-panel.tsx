@@ -1668,10 +1668,10 @@ function TaskDetailModal({
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-xs uppercase tracking-wider text-muted-foreground/70">Operit Executor</div>
-                    <div className="text-sm text-foreground/80">Run this task on a registered Operit device.</div>
+                    <div className="text-sm text-foreground/80">Run this task on a registered Operit device through AFD-MCP.</div>
                     {task.status === 'failed' && (
                       <div className="mt-1 text-xs text-amber-300/90">
-                        Gateway dispatch failed above, but you can still run this task directly on the phone through Operit.
+                        Gateway dispatch failed above, but you can still run this task through the AFD-MCP fleet layer.
                       </div>
                     )}
                   </div>
@@ -1744,7 +1744,7 @@ function TaskDetailModal({
                 {operitStatus && <div className="text-xs text-muted-foreground">{operitStatus}</div>}
                 {!operitStatus && selectedOperitDeviceId && !loadingOperitDevices && (
                   <div className="text-xs text-emerald-300/80">
-                    Direct device execution is ready. This does not require the OpenClaw gateway dispatch path.
+                    Direct device execution is ready through AFD-MCP. This does not require the OpenClaw gateway dispatch path.
                   </div>
                 )}
               </div>
